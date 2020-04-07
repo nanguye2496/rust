@@ -160,6 +160,7 @@ const PERMITTED_DEPENDENCIES: &[&str] = &[
     "serde",
     "serde_derive",
     "sha-1",
+    "sha2",
     "smallvec",
     "stable_deref_trait",
     "stacker",

@@ -1196,7 +1196,7 @@ pub fn build_session(
     let loader = file_loader.unwrap_or(Box::new(RealFileLoader));
     let hash_kind = sopts.debugging_opts.src_hash_algorithm.unwrap_or_else(|| {
         if target_cfg.target.options.is_like_msvc {
-            SourceFileHashAlgorithm::Sha1
+            SourceFileHashAlgorithm::Sha256
         } else {
             SourceFileHashAlgorithm::Md5
         }

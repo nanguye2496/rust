@@ -648,6 +648,7 @@ enum class LLVMRustChecksumKind {
   None,
   MD5,
   SHA1,
+  SHA256,
 };
 
 static Optional<DIFile::ChecksumKind> fromRust(LLVMRustChecksumKind Kind) {
@@ -658,6 +659,8 @@ static Optional<DIFile::ChecksumKind> fromRust(LLVMRustChecksumKind Kind) {
     return DIFile::ChecksumKind::CSK_MD5;
   case LLVMRustChecksumKind::SHA1:
     return DIFile::ChecksumKind::CSK_SHA1;
+  case LLVMRustChecksumKind::SHA256:
+    return DIFile::ChecksumKind::CSK_SHA256;
   default:
     report_fatal_error("bad ChecksumKind.");
   }

@@ -556,6 +556,7 @@ pub enum ChecksumKind {
     None,
     MD5,
     SHA1,
+    SHA256,
 }
 
 extern "C" {

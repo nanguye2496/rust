@@ -60,6 +60,7 @@ use std::str::FromStr;
 use md5::Md5;
 use sha1::Digest;
 use sha1::Sha1;
+use sha2::Sha256;
 
 #[cfg(test)]
 mod tests;
@@ -1014,6 +1015,7 @@ pub struct OffsetOverflowError;
 pub enum SourceFileHashAlgorithm {
     Md5,
     Sha1,
+    Sha256
 }
 
 impl FromStr for SourceFileHashAlgorithm {
@@ -1023,6 +1025,7 @@ impl FromStr for SourceFileHashAlgorithm {
         match s {
             "md5" => Ok(SourceFileHashAlgorithm::Md5),
             "sha1" => Ok(SourceFileHashAlgorithm::Sha1),
+            "sha256" => Ok(SourceFileHashAlgorithm::Sha256),
             _ => Err(()),
         }
     }
@@ -1035,7 +1038,7 @@ rustc_data_structures::impl_stable_hash_via_hash!(SourceFileHashAlgorithm);
 #[derive(HashStable_Generic, Encodable, Decodable)]
 pub struct SourceFileHash {
     pub kind: SourceFileHashAlgorithm,
-    value: [u8; 20],
+    value: [u8; 32],
 }
 
 impl SourceFileHash {
@@ -1050,6 +1053,9 @@ impl SourceFileHash {
             }
             SourceFileHashAlgorithm::Sha1 => {
                 value.copy_from_slice(&Sha1::digest(data));
+            }
+            SourceFileHashAlgorithm::Sha256 => {
+                value.copy_from_slice(&Sha256::digest(data));
             }
         }
         hash
@@ -1070,6 +1076,7 @@ impl SourceFileHash {
         match self.kind {
             SourceFileHashAlgorithm::Md5 => 16,
             SourceFileHashAlgorithm::Sha1 => 20,
+            SourceFileHashAlgorithm::Sha256 => 32,
         }
     }
 }

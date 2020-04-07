@@ -560,7 +560,7 @@ impl<D: Decoder, T: Decodable<D>> Decodable<D> for Vec<T> {
     }
 }
 
-impl<S: Encoder> Encodable<S> for [u8; 20] {
+impl<S: Encoder> Encodable<S> for [u8; 32] {
     fn encode(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_seq(self.len(), |s| {
             for (i, e) in self.iter().enumerate() {
@@ -571,11 +571,11 @@ impl<S: Encoder> Encodable<S> for [u8; 20] {
     }
 }
 
-impl<D: Decoder> Decodable<D> for [u8; 20] {
-    fn decode(d: &mut D) -> Result<[u8; 20], D::Error> {
+impl<D: Decoder> Decodable<D> for [u8; 32] {
+    fn decode(d: &mut D) -> Result<[u8; 32], D::Error> {
         d.read_seq(|d, len| {
-            assert!(len == 20);
-            let mut v = [0u8; 20];
+            assert!(len == 32);
+            let mut v = [0u8; 32];
             for i in 0..len {
                 v[i] = d.read_seq_elt(i, |d| Decodable::decode(d))?;
             }
