@@ -121,6 +121,7 @@ pub trait Linker {
     fn optimize(&mut self);
     fn pgo_gen(&mut self);
     fn control_flow_guard(&mut self);
+    fn ehcont_guard(&mut self);
     fn debuginfo(&mut self, strip: Strip);
     fn no_crt_objects(&mut self);
     fn no_default_libraries(&mut self);
@@ -477,6 +478,8 @@ impl<'a> Linker for GccLinker<'a> {
 
     fn control_flow_guard(&mut self) {}
 
+    fn ehcont_guard(&mut self) {}
+
     fn debuginfo(&mut self, strip: Strip) {
         match strip {
             Strip::None => {}
@@ -768,6 +771,10 @@ impl<'a> Linker for MsvcLinker<'a> {
         self.cmd.arg("/guard:cf");
     }
 
+    fn ehcont_guard(&mut self) {
+        self.cmd.arg("/guard:ehcont");
+    }
+
     fn debuginfo(&mut self, strip: Strip) {
         match strip {
             Strip::None => {
@@ -972,6 +979,8 @@ impl<'a> Linker for EmLinker<'a> {
 
     fn control_flow_guard(&mut self) {}
 
+    fn ehcont_guard(&mut self) {}
+
     fn debuginfo(&mut self, _strip: Strip) {
         // Preserve names or generate source maps depending on debug info
         self.cmd.arg(match self.sess.opts.debuginfo {
@@ -1174,6 +1183,8 @@ impl<'a> Linker for WasmLd<'a> {
 
     fn control_flow_guard(&mut self) {}
 
+    fn ehcont_guard(&mut self) {}
+
     fn no_crt_objects(&mut self) {}
 
     fn no_default_libraries(&mut self) {}
@@ -1338,6 +1349,8 @@ impl<'a> Linker for PtxLinker<'a> {
     fn no_default_libraries(&mut self) {}
 
     fn control_flow_guard(&mut self) {}
+
+    fn ehcont_guard(&mut self) {}
 
     fn export_symbols(&mut self, _tmpdir: &Path, _crate_type: CrateType) {}
 

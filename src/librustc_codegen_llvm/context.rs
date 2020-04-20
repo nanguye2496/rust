@@ -203,6 +203,11 @@ pub unsafe fn create_module(
         }
     }
 
+    // Set module flag to enable Windows EHCont Guard (/guard:ehcont).
+    if sess.opts.cg.ehcont_guard {
+        llvm::LLVMRustAddModuleFlag(llmod, "ehcontguard\0".as_ptr() as *const _, 1)
+    }
+
     llmod
 }
 

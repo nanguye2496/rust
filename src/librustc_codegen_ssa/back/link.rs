@@ -1714,6 +1714,11 @@ fn linker_with_args<'a, B: ArchiveBuilder<'a>>(
     }
 
     // OBJECT-FILES-NO, AUDIT-ORDER
+    if sess.opts.cg.ehcont_guard {
+        cmd.ehcont_guard();
+    }
+
+    // OBJECT-FILES-NO, AUDIT-ORDER
     add_rpath_args(cmd, sess, codegen_results, out_filename);
 
     // OBJECT-FILES-MAYBE, CUSTOMIZATION-POINT
