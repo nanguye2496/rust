@@ -398,6 +398,13 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 // and a function `fn bar(x: [(); 7])` as `fn bar(x: *const ())`.
                 // This transformed type is wrong, but these function types are
                 // already inaccurate due to ABI adjustments (see #42800).
+                for arg in fn_abi.args.iter() {
+                    match arg.layout.ty.kind() {
+                        ty::Slice(_) => { println!("Slice arg") }
+                        ty::Int(_) => { println!("int arg") }
+                        ty::RawPtr(ty::TypeAndMut { ty: inner_type, mutbl }) => { println!("Raw ptr") }
+                    }
+                }
                 signature.extend(fn_abi.args.iter().map(|arg| {
                     let t = arg.layout.ty;
                     let t = match t.kind() {
