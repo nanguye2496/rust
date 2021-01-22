@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt;
@@ -37,10 +37,7 @@ crate enum OutputFormat {
 
 impl OutputFormat {
     crate fn is_json(&self) -> bool {
-        match self {
-            OutputFormat::Json => true,
-            _ => false,
-        }
+        matches!(self, OutputFormat::Json)
     }
 }
 
@@ -222,7 +219,7 @@ crate struct RenderOptions {
     crate extern_html_root_urls: BTreeMap<String, String>,
     /// A map of the default settings (values are as for DOM storage API). Keys should lack the
     /// `rustdoc-` prefix.
-    crate default_settings: HashMap<String, String>,
+    crate default_settings: FxHashMap<String, String>,
     /// If present, suffix added to CSS/JavaScript files when referencing them in generated pages.
     crate resource_suffix: String,
     /// Whether to run the static CSS/JavaScript through a minifier when outputting them. `true` by
@@ -397,12 +394,9 @@ impl Options {
             matches
                 .opt_strs("default-setting")
                 .iter()
-                .map(|s| {
-                    let mut kv = s.splitn(2, '=');
-                    // never panics because `splitn` always returns at least one element
-                    let k = kv.next().unwrap().to_string();
-                    let v = kv.next().unwrap_or("true").to_string();
-                    (k, v)
+                .map(|s| match s.split_once('=') {
+                    None => (s.clone(), "true".to_string()),
+                    Some((k, v)) => (k.to_string(), v.to_string()),
                 })
                 .collect(),
         ];
@@ -707,11 +701,9 @@ fn parse_extern_html_roots(
 ) -> Result<BTreeMap<String, String>, &'static str> {
     let mut externs = BTreeMap::new();
     for arg in &matches.opt_strs("extern-html-root-url") {
-        let mut parts = arg.splitn(2, '=');
-        let name = parts.next().ok_or("--extern-html-root-url must not be empty")?;
-        let url = parts.next().ok_or("--extern-html-root-url must be of the form name=url")?;
+        let (name, url) =
+            arg.split_once('=').ok_or("--extern-html-root-url must be of the form name=url")?;
         externs.insert(name.to_string(), url.to_string());
     }
-
     Ok(externs)
 }

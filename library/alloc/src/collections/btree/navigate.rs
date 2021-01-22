@@ -5,10 +5,13 @@ use core::ops::RangeBounds;
 use core::ptr;
 
 use super::node::{marker, ForceResult::*, Handle, NodeRef};
-use super::search::{self, SearchResult};
+use super::search::SearchResult;
 use super::unwrap_unchecked;
 
 /// Finds the leaf edges delimiting a specified range in or underneath a node.
+///
+/// The result is meaningful only if the tree is ordered by key, like the tree
+/// in a `BTreeMap` is.
 fn range_search<BorrowType, K, V, Q, R>(
     root1: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
     root2: NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
@@ -22,7 +25,12 @@ where
     K: Borrow<Q>,
     R: RangeBounds<Q>,
 {
-    match (range.start_bound(), range.end_bound()) {
+    // WARNING: Inlining these variables would be unsound (#81138)
+    // We assume the bounds reported by `range` remain the same, but
+    // an adversarial implementation could change between calls
+    let start = range.start_bound();
+    let end = range.end_bound();
+    match (start, end) {
         (Excluded(s), Excluded(e)) if s == e => {
             panic!("range start and end are equal and excluded in BTreeMap")
         }
@@ -38,15 +46,16 @@ where
     let mut max_found = false;
 
     loop {
-        let front = match (min_found, range.start_bound()) {
-            (false, Included(key)) => match search::search_node(min_node, key) {
+        // Using `range` again would be unsound (#81138)
+        let front = match (min_found, start) {
+            (false, Included(key)) => match min_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     min_found = true;
                     kv.left_edge()
                 }
                 SearchResult::GoDown(edge) => edge,
             },
-            (false, Excluded(key)) => match search::search_node(min_node, key) {
+            (false, Excluded(key)) => match min_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     min_found = true;
                     kv.right_edge()
@@ -58,15 +67,16 @@ where
             (_, Unbounded) => min_node.first_edge(),
         };
 
-        let back = match (max_found, range.end_bound()) {
-            (false, Included(key)) => match search::search_node(max_node, key) {
+        // Using `range` again would be unsound (#81138)
+        let back = match (max_found, end) {
+            (false, Included(key)) => match max_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     max_found = true;
                     kv.right_edge()
                 }
                 SearchResult::GoDown(edge) => edge,
             },
-            (false, Excluded(key)) => match search::search_node(max_node, key) {
+            (false, Excluded(key)) => match max_node.search_node(key) {
                 SearchResult::Found(kv) => {
                     max_found = true;
                     kv.left_edge()
@@ -122,6 +132,9 @@ fn full_range<BorrowType, K, V>(
 
 impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> {
     /// Creates a pair of leaf edges delimiting a specified range in or underneath a node.
+    ///
+    /// The result is meaningful only if the tree is ordered by key, like the tree
+    /// in a `BTreeMap` is.
     pub fn range_search<Q, R>(
         self,
         range: R,
@@ -152,6 +165,9 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::ValMut<'a>, K, V, marker::LeafOrInternal>
     /// Splits a unique reference into a pair of leaf edges delimiting a specified range.
     /// The result are non-unique references allowing (some) mutation, which must be used
     /// carefully.
+    ///
+    /// The result is meaningful only if the tree is ordered by key, like the tree
+    /// in a `BTreeMap` is.
     pub fn range_search<Q, R>(
         self,
         range: R,

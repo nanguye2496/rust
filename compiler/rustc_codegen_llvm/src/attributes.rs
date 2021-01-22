@@ -35,11 +35,7 @@ fn inline(cx: &CodegenCx<'ll, '_>, val: &'ll Value, inline: InlineAttr) {
                 Attribute::NoInline.apply_llfn(Function, val);
             }
         }
-        None => {
-            Attribute::InlineHint.unapply_llfn(Function, val);
-            Attribute::AlwaysInline.unapply_llfn(Function, val);
-            Attribute::NoInline.unapply_llfn(Function, val);
-        }
+        None => {}
     };
 }
 
@@ -131,16 +127,18 @@ fn set_probestack(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
         return;
     }
 
-    // FIXME(richkadel): Make sure probestack plays nice with `-Z instrument-coverage`
-    // or disable it if not, similar to above early exits.
-
-    // Flag our internal `__rust_probestack` function as the stack probe symbol.
-    // This is defined in the `compiler-builtins` crate for each architecture.
     llvm::AddFunctionAttrStringValue(
         llfn,
         llvm::AttributePlace::Function,
         const_cstr!("probe-stack"),
-        const_cstr!("__rust_probestack"),
+        if llvm_util::get_version() < (11, 0, 1) {
+            // Flag our internal `__rust_probestack` function as the stack probe symbol.
+            // This is defined in the `compiler-builtins` crate for each architecture.
+            const_cstr!("__rust_probestack")
+        } else {
+            // On LLVM 11+, emit inline asm for stack probes instead of a function call.
+            const_cstr!("inline-asm")
+        },
     );
 }
 
@@ -229,12 +227,14 @@ pub fn from_fn_attrs(cx: &CodegenCx<'ll, 'tcx>, llfn: &'ll Value, instance: ty::
         }
     }
 
-    // FIXME(eddyb) consolidate these two `inline` calls (and avoid overwrites).
-    if instance.def.requires_inline(cx.tcx) {
-        inline(cx, llfn, attributes::InlineAttr::Hint);
-    }
-
-    inline(cx, llfn, codegen_fn_attrs.inline.clone());
+    let inline_attr = if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED) {
+        InlineAttr::Never
+    } else if codegen_fn_attrs.inline == InlineAttr::None && instance.def.requires_inline(cx.tcx) {
+        InlineAttr::Hint
+    } else {
+        codegen_fn_attrs.inline
+    };
+    inline(cx, llfn, inline_attr);
 
     // The `uwtable` attribute according to LLVM is:
     //

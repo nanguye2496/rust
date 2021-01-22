@@ -1,7 +1,6 @@
 use crate::check::FnCtxt;
 use rustc_ast as ast;
 
-use rustc_ast::util::lev_distance::find_best_match_for_name;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{pluralize, struct_span_err, Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
@@ -13,8 +12,10 @@ use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKi
 use rustc_middle::ty::subst::GenericArg;
 use rustc_middle::ty::{self, Adt, BindingMode, Ty, TypeFoldable};
 use rustc_span::hygiene::DesugaringKind;
+use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::Ident;
+use rustc_span::{BytePos, DUMMY_SP};
 use rustc_trait_selection::traits::{ObligationCause, Pattern};
 
 use std::cmp;
@@ -1001,7 +1002,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // More generally, the expected type wants a tuple variant with one field of an
         // N-arity-tuple, e.g., `V_i((p_0, .., p_N))`. Meanwhile, the user supplied a pattern
         // with the subpatterns directly in the tuple variant pattern, e.g., `V_i(p_0, .., p_N)`.
-        let missing_parenthesis = match (&expected.kind(), fields, had_err) {
+        let missing_parentheses = match (&expected.kind(), fields, had_err) {
             // #67037: only do this if we could successfully type-check the expected type against
             // the tuple struct pattern. Otherwise the substs could get out of range on e.g.,
             // `let P() = U;` where `P != U` with `struct P<T>(T);`.
@@ -1014,13 +1015,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             _ => false,
         };
-        if missing_parenthesis {
+        if missing_parentheses {
             let (left, right) = match subpats {
                 // This is the zero case; we aim to get the "hi" part of the `QPath`'s
                 // span as the "lo" and then the "hi" part of the pattern's span as the "hi".
                 // This looks like:
                 //
-                // help: missing parenthesis
+                // help: missing parentheses
                 //   |
                 // L |     let A(()) = A(());
                 //   |          ^  ^
@@ -1029,17 +1030,63 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // last sub-pattern. In the case of `A(x)` the first and last may coincide.
                 // This looks like:
                 //
-                // help: missing parenthesis
+                // help: missing parentheses
                 //   |
                 // L |     let A((x, y)) = A((1, 2));
                 //   |           ^    ^
                 [first, ..] => (first.span.shrink_to_lo(), subpats.last().unwrap().span),
             };
             err.multipart_suggestion(
-                "missing parenthesis",
+                "missing parentheses",
                 vec![(left, "(".to_string()), (right.shrink_to_hi(), ")".to_string())],
                 Applicability::MachineApplicable,
             );
+        } else if fields.len() > subpats.len() {
+            let after_fields_span = if pat_span == DUMMY_SP {
+                pat_span
+            } else {
+                pat_span.with_hi(pat_span.hi() - BytePos(1)).shrink_to_hi()
+            };
+            let all_fields_span = match subpats {
+                [] => after_fields_span,
+                [field] => field.span,
+                [first, .., last] => first.span.to(last.span),
+            };
+
+            // Check if all the fields in the pattern are wildcards.
+            let all_wildcards = subpats.iter().all(|pat| matches!(pat.kind, PatKind::Wild));
+
+            let mut wildcard_sugg = vec!["_"; fields.len() - subpats.len()].join(", ");
+            if !subpats.is_empty() {
+                wildcard_sugg = String::from(", ") + &wildcard_sugg;
+            }
+
+            err.span_suggestion_verbose(
+                after_fields_span,
+                "use `_` to explicitly ignore each field",
+                wildcard_sugg,
+                Applicability::MaybeIncorrect,
+            );
+
+            // Only suggest `..` if more than one field is missing
+            // or the pattern consists of all wildcards.
+            if fields.len() - subpats.len() > 1 || all_wildcards {
+                if subpats.is_empty() || all_wildcards {
+                    err.span_suggestion_verbose(
+                        all_fields_span,
+                        "use `..` to ignore all fields",
+                        String::from(".."),
+                        Applicability::MaybeIncorrect,
+                    );
+                } else {
+                    err.span_suggestion_verbose(
+                        after_fields_span,
+                        "use `..` to ignore the rest of the fields",
+                        String::from(", .."),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+            }
         }
 
         err.emit();
@@ -1174,7 +1221,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         let mut unmentioned_err = None;
-        // Report an error if incorrect number of the fields were specified.
+        // Report an error if an incorrect number of fields was specified.
         if adt.is_union() {
             if fields.len() != 1 {
                 tcx.sess
@@ -1185,12 +1232,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 tcx.sess.struct_span_err(pat.span, "`..` cannot be used in union patterns").emit();
             }
         } else if !etc && !unmentioned_fields.is_empty() {
-            let no_accessible_unmentioned_fields = unmentioned_fields
-                .iter()
-                .find(|(field, _)| {
-                    field.vis.is_accessible_from(tcx.parent_module(pat.hir_id).to_def_id(), tcx)
-                })
-                .is_none();
+            let no_accessible_unmentioned_fields = !unmentioned_fields.iter().any(|(field, _)| {
+                field.vis.is_accessible_from(tcx.parent_module(pat.hir_id).to_def_id(), tcx)
+            });
 
             if no_accessible_unmentioned_fields {
                 unmentioned_err = Some(self.error_no_accessible_fields(pat, &fields));
@@ -1302,8 +1346,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ),
             );
             if plural == "" {
-                let input = unmentioned_fields.iter().map(|(_, field)| &field.name);
-                let suggested_name = find_best_match_for_name(input, ident.name, None);
+                let input =
+                    unmentioned_fields.iter().map(|(_, field)| field.name).collect::<Vec<_>>();
+                let suggested_name = find_best_match_for_name(&input, ident.name, None);
                 if let Some(suggested_name) = suggested_name {
                     err.span_suggestion(
                         ident.span,
@@ -1441,11 +1486,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Returns a diagnostic reporting a struct pattern which does not mention some fields.
     ///
     /// ```text
-    /// error[E0027]: pattern does not mention field `you_cant_use_this_field`
+    /// error[E0027]: pattern does not mention field `bar`
     ///   --> src/main.rs:15:9
     ///    |
     /// LL |     let foo::Foo {} = foo::Foo::new();
-    ///    |         ^^^^^^^^^^^ missing field `you_cant_use_this_field`
+    ///    |         ^^^^^^^^^^^ missing field `bar`
     /// ```
     fn error_unmentioned_fields(
         &self,
@@ -1479,14 +1524,26 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
                 _ => return err,
             },
-            [.., field] => (
-                match pat.kind {
-                    PatKind::Struct(_, [_, ..], _) => ", ",
-                    _ => "",
-                },
-                "",
-                field.span.shrink_to_hi(),
-            ),
+            [.., field] => {
+                // if last field has a trailing comma, use the comma
+                // as the span to avoid trailing comma in ultimate
+                // suggestion (Issue #78511)
+                let tail = field.span.shrink_to_hi().until(pat.span.shrink_to_hi());
+                let tail_through_comma = self.tcx.sess.source_map().span_through_char(tail, ',');
+                let sp = if tail_through_comma == tail {
+                    field.span.shrink_to_hi()
+                } else {
+                    tail_through_comma
+                };
+                (
+                    match pat.kind {
+                        PatKind::Struct(_, [_, ..], _) => ", ",
+                        _ => "",
+                    },
+                    "",
+                    sp,
+                )
+            }
         };
         err.span_suggestion(
             sp,

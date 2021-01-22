@@ -9,7 +9,6 @@ use crate::hir::def::DefKind;
 use crate::hir::def_id::DefId;
 
 use rustc_ast as ast;
-use rustc_ast::util::lev_distance::{find_best_match_for_name, lev_distance};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::sync::Lrc;
 use rustc_hir as hir;
@@ -27,6 +26,7 @@ use rustc_middle::ty::{
 };
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
+use rustc_span::lev_distance::{find_best_match_for_name, lev_distance};
 use rustc_span::{symbol::Ident, Span, Symbol, DUMMY_SP};
 use rustc_trait_selection::autoderef::{self, Autoderef};
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
@@ -48,7 +48,7 @@ pub use self::PickKind::*;
 
 /// Boolean flag used to indicate if this search is for a suggestion
 /// or not. If true, we can allow ambiguity and so forth.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IsSuggestion(pub bool);
 
 struct ProbeContext<'a, 'tcx> {
@@ -219,6 +219,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// would result in an error (basically, the same criteria we
     /// would use to decide if a method is a plausible fit for
     /// ambiguity purposes).
+    #[instrument(level = "debug", skip(self, scope_expr_id))]
     pub fn probe_for_return_type(
         &self,
         span: Span,
@@ -264,6 +265,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .collect()
     }
 
+    #[instrument(level = "debug", skip(self, scope_expr_id))]
     pub fn probe_for_name(
         &self,
         span: Span,
@@ -423,9 +425,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             probe_cx.assemble_inherent_candidates();
             match scope {
                 ProbeScope::TraitsInScope => {
-                    probe_cx.assemble_extension_candidates_for_traits_in_scope(scope_expr_id)?
+                    probe_cx.assemble_extension_candidates_for_traits_in_scope(scope_expr_id)
                 }
-                ProbeScope::AllTraits => probe_cx.assemble_extension_candidates_for_all_traits()?,
+                ProbeScope::AllTraits => probe_cx.assemble_extension_candidates_for_all_traits(),
             };
             op(probe_cx)
         })
@@ -765,13 +767,12 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             )
         });
 
-        // It is illegal to invoke a method on a trait instance that
-        // refers to the `Self` type. An error will be reported by
-        // `enforce_object_limitations()` if the method refers to the
-        // `Self` type anywhere other than the receiver. Here, we use
-        // a substitution that replaces `Self` with the object type
-        // itself. Hence, a `&self` method will wind up with an
-        // argument type like `&Trait`.
+        // It is illegal to invoke a method on a trait instance that refers to
+        // the `Self` type. An [`ObjectSafetyViolation::SupertraitSelf`] error
+        // will be reported by `object_safety.rs` if the method refers to the
+        // `Self` type anywhere other than the receiver. Here, we use a
+        // substitution that replaces `Self` with the object type itself. Hence,
+        // a `&self` method will wind up with an argument type like `&dyn Trait`.
         let trait_ref = principal.with_self_ty(self.tcx, self_ty);
         self.elaborate_bounds(iter::once(trait_ref), |this, new_trait_ref, item| {
             let new_trait_ref = this.erase_late_bound_regions(new_trait_ref);
@@ -796,9 +797,9 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         debug!("assemble_inherent_candidates_from_param(param_ty={:?})", param_ty);
 
         let bounds = self.param_env.caller_bounds().iter().filter_map(|predicate| {
-            let bound_predicate = predicate.bound_atom();
+            let bound_predicate = predicate.kind();
             match bound_predicate.skip_binder() {
-                ty::PredicateAtom::Trait(trait_predicate, _) => {
+                ty::PredicateKind::Trait(trait_predicate, _) => {
                     match *trait_predicate.trait_ref.self_ty().kind() {
                         ty::Param(p) if p == param_ty => {
                             Some(bound_predicate.rebind(trait_predicate.trait_ref))
@@ -806,16 +807,16 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         _ => None,
                     }
                 }
-                ty::PredicateAtom::Subtype(..)
-                | ty::PredicateAtom::Projection(..)
-                | ty::PredicateAtom::RegionOutlives(..)
-                | ty::PredicateAtom::WellFormed(..)
-                | ty::PredicateAtom::ObjectSafe(..)
-                | ty::PredicateAtom::ClosureKind(..)
-                | ty::PredicateAtom::TypeOutlives(..)
-                | ty::PredicateAtom::ConstEvaluatable(..)
-                | ty::PredicateAtom::ConstEquate(..)
-                | ty::PredicateAtom::TypeWellFormedFromEnv(..) => None,
+                ty::PredicateKind::Subtype(..)
+                | ty::PredicateKind::Projection(..)
+                | ty::PredicateKind::RegionOutlives(..)
+                | ty::PredicateKind::WellFormed(..)
+                | ty::PredicateKind::ObjectSafe(..)
+                | ty::PredicateKind::ClosureKind(..)
+                | ty::PredicateKind::TypeOutlives(..)
+                | ty::PredicateKind::ConstEvaluatable(..)
+                | ty::PredicateKind::ConstEquate(..)
+                | ty::PredicateKind::TypeWellFormedFromEnv(..) => None,
             }
         });
 
@@ -867,35 +868,29 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         }
     }
 
-    fn assemble_extension_candidates_for_traits_in_scope(
-        &mut self,
-        expr_hir_id: hir::HirId,
-    ) -> Result<(), MethodError<'tcx>> {
+    fn assemble_extension_candidates_for_traits_in_scope(&mut self, expr_hir_id: hir::HirId) {
         let mut duplicates = FxHashSet::default();
         let opt_applicable_traits = self.tcx.in_scope_traits(expr_hir_id);
         if let Some(applicable_traits) = opt_applicable_traits {
             for trait_candidate in applicable_traits.iter() {
                 let trait_did = trait_candidate.def_id;
                 if duplicates.insert(trait_did) {
-                    let result = self.assemble_extension_candidates_for_trait(
+                    self.assemble_extension_candidates_for_trait(
                         &trait_candidate.import_ids,
                         trait_did,
                     );
-                    result?;
                 }
             }
         }
-        Ok(())
     }
 
-    fn assemble_extension_candidates_for_all_traits(&mut self) -> Result<(), MethodError<'tcx>> {
+    fn assemble_extension_candidates_for_all_traits(&mut self) {
         let mut duplicates = FxHashSet::default();
         for trait_info in suggest::all_traits(self.tcx) {
             if duplicates.insert(trait_info.def_id) {
-                self.assemble_extension_candidates_for_trait(&smallvec![], trait_info.def_id)?;
+                self.assemble_extension_candidates_for_trait(&smallvec![], trait_info.def_id);
             }
         }
-        Ok(())
     }
 
     pub fn matches_return_type(
@@ -933,7 +928,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         &mut self,
         import_ids: &SmallVec<[LocalDefId; 1]>,
         trait_def_id: DefId,
-    ) -> Result<(), MethodError<'tcx>> {
+    ) {
         debug!("assemble_extension_candidates_for_trait(trait_def_id={:?})", trait_def_id);
         let trait_substs = self.fresh_item_substs(trait_def_id);
         let trait_ref = ty::TraitRef::new(trait_def_id, trait_substs);
@@ -981,7 +976,6 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 );
             }
         }
-        Ok(())
     }
 
     fn candidate_method_names(&self) -> Vec<Ident> {
@@ -1028,7 +1022,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let span = self.span;
         let tcx = self.tcx;
 
-        self.assemble_extension_candidates_for_all_traits()?;
+        self.assemble_extension_candidates_for_all_traits();
 
         let out_of_scope_traits = match self.pick_core() {
             Some(Ok(p)) => vec![p.item.container.id()],
@@ -1538,8 +1532,11 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 Ok(None)
             } else {
                 let best_name = {
-                    let names = applicable_close_candidates.iter().map(|cand| &cand.ident.name);
-                    find_best_match_for_name(names, self.method_name.unwrap().name, None)
+                    let names = applicable_close_candidates
+                        .iter()
+                        .map(|cand| cand.ident.name)
+                        .collect::<Vec<Symbol>>();
+                    find_best_match_for_name(&names, self.method_name.unwrap().name, None)
                 }
                 .unwrap();
                 Ok(applicable_close_candidates

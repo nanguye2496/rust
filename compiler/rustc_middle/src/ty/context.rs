@@ -1,11 +1,12 @@
 //! Type context book-keeping.
 
 use crate::arena::Arena;
-use crate::dep_graph::{self, DepConstructor, DepGraph};
+use crate::dep_graph::DepGraph;
 use crate::hir::exports::ExportMap;
+use crate::hir::place::Place as HirPlace;
 use crate::ich::{NodeIdHashingMode, StableHashingContext};
 use crate::infer::canonical::{Canonical, CanonicalVarInfo, CanonicalVarInfos};
-use crate::lint::{struct_lint_level, LintDiagnosticBuilder, LintSource};
+use crate::lint::{struct_lint_level, LintDiagnosticBuilder, LintLevelSource};
 use crate::middle;
 use crate::middle::cstore::{CrateStoreDyn, EncodedMetadata};
 use crate::middle::resolve_lifetime::{self, ObjectLifetimeDefault};
@@ -17,9 +18,9 @@ use crate::ty::query::{self, TyCtxtAt};
 use crate::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef, UserSubsts};
 use crate::ty::TyKind::*;
 use crate::ty::{
-    self, AdtDef, AdtKind, BindingMode, BoundVar, CanonicalPolyFnSig, Const, ConstVid, DefIdTree,
-    ExistentialPredicate, FloatVar, FloatVid, GenericParamDefKind, InferConst, InferTy, IntVar,
-    IntVid, List, ParamConst, ParamTy, PolyFnSig, Predicate, PredicateInner, PredicateKind,
+    self, AdtDef, AdtKind, Binder, BindingMode, BoundVar, CanonicalPolyFnSig, Const, ConstVid,
+    DefIdTree, ExistentialPredicate, FloatVar, FloatVid, GenericParamDefKind, InferConst, InferTy,
+    IntVar, IntVid, List, ParamConst, ParamTy, PolyFnSig, Predicate, PredicateInner, PredicateKind,
     ProjectionTy, Region, RegionKind, ReprOptions, TraitObjectVisitor, Ty, TyKind, TyS, TyVar,
     TyVid, TypeAndMut, Visibility,
 };
@@ -34,17 +35,19 @@ use rustc_data_structures::stable_hasher::{
 };
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{self, Lock, Lrc, WorkerLocal};
-use rustc_data_structures::unhash::UnhashMap;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LOCAL_CRATE};
-use rustc_hir::definitions::{DefPathHash, Definitions};
+use rustc_hir::definitions::Definitions;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{HirId, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet, Node, TraitCandidate};
+use rustc_hir::{
+    Constness, HirId, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet, Node, TraitCandidate,
+};
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_macros::HashStable;
+use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_session::config::{BorrowckMode, CrateType, OutputFilenames};
 use rustc_session::lint::{Level, Lint};
 use rustc_session::Session;
@@ -85,7 +88,7 @@ pub struct CtxtInterners<'tcx> {
     substs: InternedSet<'tcx, InternalSubsts<'tcx>>,
     canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo<'tcx>>>,
     region: InternedSet<'tcx, RegionKind>,
-    existential_predicates: InternedSet<'tcx, List<ExistentialPredicate<'tcx>>>,
+    poly_existential_predicates: InternedSet<'tcx, List<ty::Binder<ExistentialPredicate<'tcx>>>>,
     predicate: InternedSet<'tcx, PredicateInner<'tcx>>,
     predicates: InternedSet<'tcx, List<Predicate<'tcx>>>,
     projs: InternedSet<'tcx, List<ProjectionKind>>,
@@ -101,7 +104,7 @@ impl<'tcx> CtxtInterners<'tcx> {
             type_list: Default::default(),
             substs: Default::default(),
             region: Default::default(),
-            existential_predicates: Default::default(),
+            poly_existential_predicates: Default::default(),
             canonical_var_infos: Default::default(),
             predicate: Default::default(),
             predicates: Default::default(),
@@ -131,7 +134,7 @@ impl<'tcx> CtxtInterners<'tcx> {
     }
 
     #[inline(never)]
-    fn intern_predicate(&self, kind: PredicateKind<'tcx>) -> &'tcx PredicateInner<'tcx> {
+    fn intern_predicate(&self, kind: Binder<PredicateKind<'tcx>>) -> &'tcx PredicateInner<'tcx> {
         self.predicate
             .intern(kind, |kind| {
                 let flags = super::flags::FlagComputation::for_predicate(kind);
@@ -297,6 +300,7 @@ pub struct ResolvedOpaqueTy<'tcx> {
 /// Here, we would store the type `T`, the span of the value `x`, the "scope-span" for
 /// the scope that contains `x`, the expr `T` evaluated from, and the span of `foo.await`.
 #[derive(TyEncodable, TyDecodable, Clone, Debug, Eq, Hash, PartialEq, HashStable)]
+#[derive(TypeFoldable)]
 pub struct GeneratorInteriorTypeCause<'tcx> {
     /// Type of the captured binding.
     pub ty: Ty<'tcx>,
@@ -376,7 +380,7 @@ pub struct TypeckResults<'tcx> {
 
     /// Records the reasons that we picked the kind of each closure;
     /// not all closures are present in the map.
-    closure_kind_origins: ItemLocalMap<(Span, Symbol)>,
+    closure_kind_origins: ItemLocalMap<(Span, HirPlace<'tcx>)>,
 
     /// For each fn, records the "liberated" types of its arguments
     /// and return type. Liberated means that all bound regions
@@ -421,7 +425,7 @@ pub struct TypeckResults<'tcx> {
 
     /// Stores the type, expression, span and optional scope span of all types
     /// that are live across the yield of this generator (if a generator).
-    pub generator_interior_types: Vec<GeneratorInteriorTypeCause<'tcx>>,
+    pub generator_interior_types: ty::Binder<Vec<GeneratorInteriorTypeCause<'tcx>>>,
 
     /// We sometimes treat byte string literals (which are of type `&[u8; N]`)
     /// as `&[u8]`, depending on the pattern  in which they are used.
@@ -453,7 +457,7 @@ impl<'tcx> TypeckResults<'tcx> {
             concrete_opaque_types: Default::default(),
             closure_captures: Default::default(),
             closure_min_captures: Default::default(),
-            generator_interior_types: Default::default(),
+            generator_interior_types: ty::Binder::dummy(Default::default()),
             treat_byte_string_as_slice: Default::default(),
         }
     }
@@ -622,15 +626,30 @@ impl<'tcx> TypeckResults<'tcx> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.pat_adjustments }
     }
 
+    /// For a given closure, returns the iterator of `ty::CapturedPlace`s that are captured
+    /// by the closure.
+    pub fn closure_min_captures_flattened(
+        &self,
+        closure_def_id: DefId,
+    ) -> impl Iterator<Item = &ty::CapturedPlace<'tcx>> {
+        self.closure_min_captures
+            .get(&closure_def_id)
+            .map(|closure_min_captures| closure_min_captures.values().flat_map(|v| v.iter()))
+            .into_iter()
+            .flatten()
+    }
+
     pub fn upvar_capture(&self, upvar_id: ty::UpvarId) -> ty::UpvarCapture<'tcx> {
         self.upvar_capture_map[&upvar_id]
     }
 
-    pub fn closure_kind_origins(&self) -> LocalTableInContext<'_, (Span, Symbol)> {
+    pub fn closure_kind_origins(&self) -> LocalTableInContext<'_, (Span, HirPlace<'tcx>)> {
         LocalTableInContext { hir_owner: self.hir_owner, data: &self.closure_kind_origins }
     }
 
-    pub fn closure_kind_origins_mut(&mut self) -> LocalTableInContextMut<'_, (Span, Symbol)> {
+    pub fn closure_kind_origins_mut(
+        &mut self,
+    ) -> LocalTableInContextMut<'_, (Span, HirPlace<'tcx>)> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.closure_kind_origins }
     }
 
@@ -874,7 +893,7 @@ pub struct FreeRegionInfo {
     // `LocalDefId` corresponding to FreeRegion
     pub def_id: LocalDefId,
     // the bound region corresponding to FreeRegion
-    pub boundregion: ty::BoundRegion,
+    pub boundregion: ty::BoundRegionKind,
     // checks if bound region is in Impl Item
     pub is_impl_item: bool,
 }
@@ -942,10 +961,6 @@ pub struct GlobalCtxt<'tcx> {
 
     pub(crate) untracked_crate: &'tcx hir::Crate<'tcx>,
     pub(crate) definitions: &'tcx Definitions,
-
-    /// A map from `DefPathHash` -> `DefId`. Includes `DefId`s from the local crate
-    /// as well as all upstream crates. Only populated in incremental mode.
-    pub def_path_hash_to_def_id: Option<UnhashMap<DefPathHash, DefId>>,
 
     pub queries: query::Queries<'tcx>,
 
@@ -1094,7 +1109,7 @@ impl<'tcx> TyCtxt<'tcx> {
         krate: &'tcx hir::Crate<'tcx>,
         definitions: &'tcx Definitions,
         dep_graph: DepGraph,
-        on_disk_query_result_cache: query::OnDiskCache<'tcx>,
+        on_disk_query_result_cache: Option<query::OnDiskCache<'tcx>>,
         crate_name: &str,
         output_filenames: &OutputFilenames,
     ) -> GlobalCtxt<'tcx> {
@@ -1110,21 +1125,6 @@ impl<'tcx> TyCtxt<'tcx> {
         let max_cnum = crates.iter().map(|c| c.as_usize()).max().unwrap_or(0);
         let mut providers = IndexVec::from_elem_n(extern_providers, max_cnum + 1);
         providers[LOCAL_CRATE] = local_providers;
-
-        let def_path_hash_to_def_id = if s.opts.build_dep_graph() {
-            let capacity = definitions.def_path_table().num_def_ids()
-                + crates.iter().map(|cnum| cstore.num_def_ids(*cnum)).sum::<usize>();
-            let mut map = UnhashMap::with_capacity_and_hasher(capacity, Default::default());
-
-            map.extend(definitions.def_path_table().all_def_path_hashes_and_def_ids(LOCAL_CRATE));
-            for cnum in &crates {
-                map.extend(cstore.all_def_path_hashes_and_def_ids(*cnum).into_iter());
-            }
-
-            Some(map)
-        } else {
-            None
-        };
 
         let mut trait_map: FxHashMap<_, FxHashMap<_, _>> = FxHashMap::default();
         for (hir_id, v) in krate.trait_map.iter() {
@@ -1153,7 +1153,6 @@ impl<'tcx> TyCtxt<'tcx> {
             extern_prelude: resolutions.extern_prelude,
             untracked_crate: krate,
             definitions,
-            def_path_hash_to_def_id,
             queries: query::Queries::new(providers, extern_providers, on_disk_query_result_cache),
             ty_rcache: Default::default(),
             pred_rcache: Default::default(),
@@ -1318,32 +1317,8 @@ impl<'tcx> TyCtxt<'tcx> {
         StableHashingContext::ignore_spans(self.sess, krate, self.definitions, &*self.cstore)
     }
 
-    // This method makes sure that we have a DepNode and a Fingerprint for
-    // every upstream crate. It needs to be called once right after the tcx is
-    // created.
-    // With full-fledged red/green, the method will probably become unnecessary
-    // as this will be done on-demand.
-    pub fn allocate_metadata_dep_nodes(self) {
-        // We cannot use the query versions of crates() and crate_hash(), since
-        // those would need the DepNodes that we are allocating here.
-        for cnum in self.cstore.crates_untracked() {
-            let dep_node = DepConstructor::CrateMetadata(self, cnum);
-            let crate_hash = self.cstore.crate_hash_untracked(cnum);
-            self.dep_graph.with_task(
-                dep_node,
-                self,
-                crate_hash,
-                |_, x| x, // No transformation needed
-                dep_graph::hash_result,
-            );
-        }
-    }
-
-    pub fn serialize_query_result_cache<E>(self, encoder: &mut E) -> Result<(), E::Error>
-    where
-        E: ty::codec::OpaqueEncoder,
-    {
-        self.queries.on_disk_cache.serialize(self, encoder)
+    pub fn serialize_query_result_cache(self, encoder: &mut FileEncoder) -> FileEncodeResult {
+        self.queries.on_disk_cache.as_ref().map_or(Ok(()), |c| c.serialize(self, encoder))
     }
 
     /// If `true`, we should use the MIR-based borrowck, but also
@@ -1389,7 +1364,7 @@ impl<'tcx> TyCtxt<'tcx> {
     #[inline]
     pub fn lazy_normalization(self) -> bool {
         let features = self.features();
-        // Note: We do not enable lazy normalization for `features.min_const_generics`.
+        // Note: We do not enable lazy normalization for `min_const_generics`.
         features.const_generics || features.lazy_normalization_consts
     }
 
@@ -1415,7 +1390,7 @@ impl<'tcx> TyCtxt<'tcx> {
         })
     }
 
-    // Returns the `DefId` and the `BoundRegion` corresponding to the given region.
+    // Returns the `DefId` and the `BoundRegionKind` corresponding to the given region.
     pub fn is_suitable_region(self, region: Region<'tcx>) -> Option<FreeRegionInfo> {
         let (suitable_region_binding_scope, bound_region) = match *region {
             ty::ReFree(ref free_region) => {
@@ -1423,7 +1398,7 @@ impl<'tcx> TyCtxt<'tcx> {
             }
             ty::ReEarlyBound(ref ebr) => (
                 self.parent(ebr.def_id).unwrap().expect_local(),
-                ty::BoundRegion::BrNamed(ebr.def_id, ebr.name),
+                ty::BoundRegionKind::BrNamed(ebr.def_id, ebr.name),
             ),
             _ => return None, // not a free region
         };
@@ -1627,13 +1602,15 @@ nop_lift! {const_; &'a Const<'a> => &'tcx Const<'tcx>}
 nop_lift! {predicate; &'a PredicateInner<'a> => &'tcx PredicateInner<'tcx>}
 
 nop_list_lift! {type_list; Ty<'a> => Ty<'tcx>}
-nop_list_lift! {existential_predicates; ExistentialPredicate<'a> => ExistentialPredicate<'tcx>}
+nop_list_lift! {poly_existential_predicates; ty::Binder<ExistentialPredicate<'a>> => ty::Binder<ExistentialPredicate<'tcx>>}
 nop_list_lift! {predicates; Predicate<'a> => Predicate<'tcx>}
 nop_list_lift! {canonical_var_infos; CanonicalVarInfo<'a> => CanonicalVarInfo<'tcx>}
 nop_list_lift! {projs; ProjectionKind => ProjectionKind}
 
 // This is the impl for `&'a InternalSubsts<'a>`.
 nop_list_lift! {substs; GenericArg<'a> => GenericArg<'tcx>}
+
+CloneLiftImpls! { for<'tcx> { Constness, } }
 
 pub mod tls {
     use super::{ptr_eq, GlobalCtxt, TyCtxt};
@@ -1974,8 +1951,8 @@ impl<'tcx> Hash for Interned<'tcx, PredicateInner<'tcx>> {
     }
 }
 
-impl<'tcx> Borrow<PredicateKind<'tcx>> for Interned<'tcx, PredicateInner<'tcx>> {
-    fn borrow<'a>(&'a self) -> &'a PredicateKind<'tcx> {
+impl<'tcx> Borrow<Binder<PredicateKind<'tcx>>> for Interned<'tcx, PredicateInner<'tcx>> {
+    fn borrow<'a>(&'a self) -> &'a Binder<PredicateKind<'tcx>> {
         &self.0.kind
     }
 }
@@ -2009,12 +1986,6 @@ impl<'tcx> Borrow<RegionKind> for Interned<'tcx, RegionKind> {
 
 impl<'tcx> Borrow<Const<'tcx>> for Interned<'tcx, Const<'tcx>> {
     fn borrow<'a>(&'a self) -> &'a Const<'tcx> {
-        &self.0
-    }
-}
-
-impl<'tcx> Borrow<PredicateKind<'tcx>> for Interned<'tcx, PredicateKind<'tcx>> {
-    fn borrow<'a>(&'a self) -> &'a PredicateKind<'tcx> {
         &self.0
     }
 }
@@ -2066,7 +2037,8 @@ slice_interners!(
     type_list: _intern_type_list(Ty<'tcx>),
     substs: _intern_substs(GenericArg<'tcx>),
     canonical_var_infos: _intern_canonical_var_infos(CanonicalVarInfo<'tcx>),
-    existential_predicates: _intern_existential_predicates(ExistentialPredicate<'tcx>),
+    poly_existential_predicates:
+        _intern_poly_existential_predicates(ty::Binder<ExistentialPredicate<'tcx>>),
     predicates: _intern_predicates(Predicate<'tcx>),
     projs: _intern_projs(ProjectionKind),
     place_elems: _intern_place_elems(PlaceElem<'tcx>),
@@ -2116,8 +2088,8 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     #[inline]
-    pub fn mk_predicate(self, kind: PredicateKind<'tcx>) -> Predicate<'tcx> {
-        let inner = self.interners.intern_predicate(kind);
+    pub fn mk_predicate(self, binder: Binder<PredicateKind<'tcx>>) -> Predicate<'tcx> {
+        let inner = self.interners.intern_predicate(binder);
         Predicate { inner }
     }
 
@@ -2125,9 +2097,9 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn reuse_or_mk_predicate(
         self,
         pred: Predicate<'tcx>,
-        kind: PredicateKind<'tcx>,
+        binder: Binder<PredicateKind<'tcx>>,
     ) -> Predicate<'tcx> {
-        if *pred.kind() != kind { self.mk_predicate(kind) } else { pred }
+        if pred.kind() != binder { self.mk_predicate(binder) } else { pred }
     }
 
     pub fn mk_mach_int(self, tm: ast::IntTy) -> Ty<'tcx> {
@@ -2297,7 +2269,7 @@ impl<'tcx> TyCtxt<'tcx> {
     #[inline]
     pub fn mk_dynamic(
         self,
-        obj: ty::Binder<&'tcx List<ExistentialPredicate<'tcx>>>,
+        obj: &'tcx List<ty::Binder<ExistentialPredicate<'tcx>>>,
         reg: ty::Region<'tcx>,
     ) -> Ty<'tcx> {
         self.mk_ty(Dynamic(obj, reg))
@@ -2427,13 +2399,17 @@ impl<'tcx> TyCtxt<'tcx> {
         Place { local: place.local, projection: self.intern_place_elems(&projection) }
     }
 
-    pub fn intern_existential_predicates(
+    pub fn intern_poly_existential_predicates(
         self,
-        eps: &[ExistentialPredicate<'tcx>],
-    ) -> &'tcx List<ExistentialPredicate<'tcx>> {
+        eps: &[ty::Binder<ExistentialPredicate<'tcx>>],
+    ) -> &'tcx List<ty::Binder<ExistentialPredicate<'tcx>>> {
         assert!(!eps.is_empty());
-        assert!(eps.array_windows().all(|[a, b]| a.stable_cmp(self, b) != Ordering::Greater));
-        self._intern_existential_predicates(eps)
+        assert!(
+            eps.array_windows()
+                .all(|[a, b]| a.skip_binder().stable_cmp(self, &b.skip_binder())
+                    != Ordering::Greater)
+        );
+        self._intern_poly_existential_predicates(eps)
     }
 
     pub fn intern_predicates(self, preds: &[Predicate<'tcx>]) -> &'tcx List<Predicate<'tcx>> {
@@ -2490,13 +2466,16 @@ impl<'tcx> TyCtxt<'tcx> {
         })
     }
 
-    pub fn mk_existential_predicates<
-        I: InternAs<[ExistentialPredicate<'tcx>], &'tcx List<ExistentialPredicate<'tcx>>>,
+    pub fn mk_poly_existential_predicates<
+        I: InternAs<
+            [ty::Binder<ExistentialPredicate<'tcx>>],
+            &'tcx List<ty::Binder<ExistentialPredicate<'tcx>>>,
+        >,
     >(
         self,
         iter: I,
     ) -> I::Output {
-        iter.intern_with(|xs| self.intern_existential_predicates(xs))
+        iter.intern_with(|xs| self.intern_poly_existential_predicates(xs))
     }
 
     pub fn mk_predicates<I: InternAs<[Predicate<'tcx>], &'tcx List<Predicate<'tcx>>>>(
@@ -2552,7 +2531,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         lint: &'static Lint,
         mut id: hir::HirId,
-    ) -> (Level, LintSource) {
+    ) -> (Level, LintLevelSource) {
         let sets = self.lint_levels(LOCAL_CRATE);
         loop {
             if let Some(pair) = sets.level_and_source(lint, id, self.sess) {
@@ -2596,7 +2575,8 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn is_late_bound(self, id: HirId) -> bool {
-        self.is_late_bound_map(id.owner).map(|set| set.contains(&id.local_id)).unwrap_or(false)
+        self.is_late_bound_map(id.owner)
+            .map_or(false, |(owner, set)| owner == id.owner && set.contains(&id.local_id))
     }
 
     pub fn object_lifetime_defaults(self, id: HirId) -> Option<&'tcx [ObjectLifetimeDefault]> {

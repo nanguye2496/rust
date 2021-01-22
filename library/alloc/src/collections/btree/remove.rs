@@ -1,10 +1,9 @@
 use super::map::MIN_LEN;
 use super::node::{marker, ForceResult::*, Handle, LeftOrRight::*, NodeRef};
 use super::unwrap_unchecked;
-use core::mem;
 
 impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::LeafOrInternal>, marker::KV> {
-    /// Removes a key/value-pair from the tree, and returns that pair, as well as
+    /// Removes a key-value pair from the tree, and returns that pair, as well as
     /// the leaf edge corresponding to that former pair. It's possible this empties
     /// a root node that is internal, which the caller should pop from the map
     /// holding the tree. The caller should also decrement the map's length.
@@ -34,7 +33,7 @@ impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, mark
                 Ok(Left(left_parent_kv)) => {
                     debug_assert!(left_parent_kv.right_child_len() == MIN_LEN - 1);
                     if left_parent_kv.can_merge() {
-                        left_parent_kv.merge(Some(Right(idx)))
+                        left_parent_kv.merge_tracking_child_edge(Right(idx))
                     } else {
                         debug_assert!(left_parent_kv.left_child_len() > MIN_LEN);
                         left_parent_kv.steal_left(idx)
@@ -43,7 +42,7 @@ impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, mark
                 Ok(Right(right_parent_kv)) => {
                     debug_assert!(right_parent_kv.left_child_len() == MIN_LEN - 1);
                     if right_parent_kv.can_merge() {
-                        right_parent_kv.merge(Some(Left(idx)))
+                        right_parent_kv.merge_tracking_child_edge(Left(idx))
                     } else {
                         debug_assert!(right_parent_kv.right_child_len() > MIN_LEN);
                         right_parent_kv.steal_right(idx)
@@ -55,12 +54,12 @@ impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Leaf>, mark
             pos = unsafe { new_pos.cast_to_leaf_unchecked() };
 
             // Only if we merged, the parent (if any) has shrunk, but skipping
-            // the following step does not pay off in benchmarks.
+            // the following step otherwise does not pay off in benchmarks.
             //
             // SAFETY: We won't destroy or rearrange the leaf where `pos` is at
             // by handling its parent recursively; at worst we will destroy or
             // rearrange the parent through the grandparent, thus change the
-            // leaf's parent pointer.
+            // link to the parent inside the leaf.
             if let Ok(parent) = unsafe { pos.reborrow_mut() }.into_node().ascend() {
                 parent.into_node().handle_shrunk_node_recursively(handle_emptied_internal_root);
             }
@@ -84,16 +83,15 @@ impl<'a, K: 'a, V: 'a> Handle<NodeRef<marker::Mut<'a>, K, V, marker::Internal>, 
         // The internal node may have been stolen from or merged. Go back right
         // to find where the original KV ended up.
         let mut internal = unsafe { unwrap_unchecked(left_hole.next_kv().ok()) };
-        let old_key = mem::replace(internal.kv_mut().0, left_kv.0);
-        let old_val = mem::replace(internal.kv_mut().1, left_kv.1);
+        let old_kv = internal.replace_kv(left_kv.0, left_kv.1);
         let pos = internal.next_leaf_edge();
-        ((old_key, old_val), pos)
+        (old_kv, pos)
     }
 }
 
 impl<'a, K: 'a, V: 'a> NodeRef<marker::Mut<'a>, K, V, marker::Internal> {
-    /// Stocks up a possibly underfull internal node, recursively.
-    /// Climbs up until it reaches an ancestor that has elements to spare or the root.
+    /// Stocks up a possibly underfull internal node and its ancestors,
+    /// until it reaches an ancestor that has elements to spare or is the root.
     fn handle_shrunk_node_recursively<F: FnOnce()>(mut self, handle_emptied_internal_root: F) {
         loop {
             self = match self.len() {
@@ -123,27 +121,25 @@ impl<'a, K: 'a, V: 'a> NodeRef<marker::Mut<'a>, K, V, marker::Internal> {
         self,
     ) -> Option<NodeRef<marker::Mut<'a>, K, V, marker::Internal>> {
         match self.forget_type().choose_parent_kv() {
-            Ok(Left(left_parent_kv)) => {
-                debug_assert!(left_parent_kv.right_child_len() == MIN_LEN - 1);
+            Ok(Left(mut left_parent_kv)) => {
+                debug_assert_eq!(left_parent_kv.right_child_len(), MIN_LEN - 1);
                 if left_parent_kv.can_merge() {
-                    let pos = left_parent_kv.merge(None);
-                    let parent_edge = unsafe { unwrap_unchecked(pos.into_node().ascend().ok()) };
-                    Some(parent_edge.into_node())
+                    let parent = left_parent_kv.merge_tracking_parent();
+                    Some(parent)
                 } else {
                     debug_assert!(left_parent_kv.left_child_len() > MIN_LEN);
-                    left_parent_kv.steal_left(0);
+                    left_parent_kv.bulk_steal_left(1);
                     None
                 }
             }
-            Ok(Right(right_parent_kv)) => {
-                debug_assert!(right_parent_kv.left_child_len() == MIN_LEN - 1);
+            Ok(Right(mut right_parent_kv)) => {
+                debug_assert_eq!(right_parent_kv.left_child_len(), MIN_LEN - 1);
                 if right_parent_kv.can_merge() {
-                    let pos = right_parent_kv.merge(None);
-                    let parent_edge = unsafe { unwrap_unchecked(pos.into_node().ascend().ok()) };
-                    Some(parent_edge.into_node())
+                    let parent = right_parent_kv.merge_tracking_parent();
+                    Some(parent)
                 } else {
                     debug_assert!(right_parent_kv.right_child_len() > MIN_LEN);
-                    right_parent_kv.steal_right(0);
+                    right_parent_kv.bulk_steal_right(1);
                     None
                 }
             }

@@ -55,6 +55,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::BodyOwnerKind::Closure | hir::BodyOwnerKind::Fn => (),
         }
         wbcx.visit_body(body);
+        wbcx.visit_min_capture_map();
         wbcx.visit_upvar_capture_map();
         wbcx.visit_closures();
         wbcx.visit_liberated_fn_sigs();
@@ -88,7 +89,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// The Writeback context. This visitor walks the AST, checking the
+// The Writeback context. This visitor walks the HIR, checking the
 // fn-specific typeck results to find references to types or regions. It
 // resolves those regions to remove inference variables and writes the
 // final result back into the master typeck results in the tcx. Here and
@@ -194,7 +195,9 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             let mut typeck_results = self.fcx.typeck_results.borrow_mut();
 
             // All valid indexing looks like this; might encounter non-valid indexes at this point.
-            let base_ty = typeck_results.expr_ty_adjusted_opt(&base).map(|t| t.kind());
+            let base_ty = typeck_results
+                .expr_ty_adjusted_opt(&base)
+                .map(|t| self.fcx.resolve_vars_if_possible(t).kind());
             if base_ty.is_none() {
                 // When encountering `return [0][0]` outside of a `fn` body we can encounter a base
                 // that isn't in the type table. We assume more relevant errors have already been
@@ -329,6 +332,37 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
 }
 
 impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
+    fn visit_min_capture_map(&mut self) {
+        let mut min_captures_wb = ty::MinCaptureInformationMap::with_capacity_and_hasher(
+            self.fcx.typeck_results.borrow().closure_min_captures.len(),
+            Default::default(),
+        );
+        for (closure_def_id, root_min_captures) in
+            self.fcx.typeck_results.borrow().closure_min_captures.iter()
+        {
+            let mut root_var_map_wb = ty::RootVariableMinCaptureList::with_capacity_and_hasher(
+                root_min_captures.len(),
+                Default::default(),
+            );
+            for (var_hir_id, min_list) in root_min_captures.iter() {
+                let min_list_wb = min_list
+                    .iter()
+                    .map(|captured_place| {
+                        let locatable = captured_place.info.expr_id.unwrap_or(
+                            self.tcx().hir().local_def_id_to_hir_id(closure_def_id.expect_local()),
+                        );
+
+                        self.resolve(captured_place.clone(), &locatable)
+                    })
+                    .collect();
+                root_var_map_wb.insert(*var_hir_id, min_list_wb);
+            }
+            min_captures_wb.insert(*closure_def_id, root_var_map_wb);
+        }
+
+        self.typeck_results.closure_min_captures = min_captures_wb;
+    }
+
     fn visit_upvar_capture_map(&mut self) {
         for (upvar_id, upvar_capture) in self.fcx.typeck_results.borrow().upvar_capture_map.iter() {
             let new_upvar_capture = match *upvar_capture {
@@ -350,9 +384,11 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
         assert_eq!(fcx_typeck_results.hir_owner, self.typeck_results.hir_owner);
         let common_hir_owner = fcx_typeck_results.hir_owner;
 
-        for (&id, &origin) in fcx_typeck_results.closure_kind_origins().iter() {
-            let hir_id = hir::HirId { owner: common_hir_owner, local_id: id };
-            self.typeck_results.closure_kind_origins_mut().insert(hir_id, origin);
+        for (id, origin) in fcx_typeck_results.closure_kind_origins().iter() {
+            let hir_id = hir::HirId { owner: common_hir_owner, local_id: *id };
+            let place_span = origin.0;
+            let place = self.resolve(origin.1.clone(), &place_span);
+            self.typeck_results.closure_kind_origins_mut().insert(hir_id, (place_span, place));
         }
     }
 
@@ -658,6 +694,7 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
                     Some(self.body.id()),
                     self.span.to_span(self.tcx),
                     t.into(),
+                    vec![],
                     E0282,
                 )
                 .emit();
@@ -671,6 +708,7 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
                     Some(self.body.id()),
                     self.span.to_span(self.tcx),
                     c.into(),
+                    vec![],
                     E0282,
                 )
                 .emit();

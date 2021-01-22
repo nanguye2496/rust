@@ -13,7 +13,7 @@ crate struct Stripper<'a> {
 
 impl<'a> DocFolder for Stripper<'a> {
     fn fold_item(&mut self, i: Item) -> Option<Item> {
-        match i.kind {
+        match *i.kind {
             clean::StrippedItem(..) => {
                 // We need to recurse into stripped modules to strip things
                 // like impl methods but when doing so we must not add any
@@ -22,7 +22,7 @@ impl<'a> DocFolder for Stripper<'a> {
                 let old = mem::replace(&mut self.update_retained, false);
                 let ret = self.fold_item_recur(i);
                 self.update_retained = old;
-                return ret;
+                return Some(ret);
             }
             // These items can all get re-exported
             clean::OpaqueTyItem(..)
@@ -51,7 +51,7 @@ impl<'a> DocFolder for Stripper<'a> {
 
             clean::StructFieldItem(..) => {
                 if !i.visibility.is_public() {
-                    return StripItem(i).strip();
+                    return Some(StripItem(i).strip());
                 }
             }
 
@@ -59,9 +59,9 @@ impl<'a> DocFolder for Stripper<'a> {
                 if i.def_id.is_local() && !i.visibility.is_public() {
                     debug!("Stripper: stripping module {:?}", i.name);
                     let old = mem::replace(&mut self.update_retained, false);
-                    let ret = StripItem(self.fold_item_recur(i).unwrap()).strip();
+                    let ret = StripItem(self.fold_item_recur(i)).strip();
                     self.update_retained = old;
-                    return ret;
+                    return Some(ret);
                 }
             }
 
@@ -86,7 +86,7 @@ impl<'a> DocFolder for Stripper<'a> {
             clean::KeywordItem(..) => {}
         }
 
-        let fastreturn = match i.kind {
+        let fastreturn = match *i.kind {
             // nothing left to do for traits (don't want to filter their
             // methods out, visibility controlled by the trait)
             clean::TraitItem(..) => true,
@@ -94,7 +94,7 @@ impl<'a> DocFolder for Stripper<'a> {
             // implementations of traits are always public.
             clean::ImplItem(ref imp) if imp.trait_.is_some() => true,
             // Struct variant fields have inherited visibility
-            clean::VariantItem(clean::Variant { kind: clean::VariantKind::Struct(..) }) => true,
+            clean::VariantItem(clean::Variant::Struct(..)) => true,
             _ => false,
         };
 
@@ -107,12 +107,10 @@ impl<'a> DocFolder for Stripper<'a> {
             self.fold_item_recur(i)
         };
 
-        if let Some(ref i) = i {
-            if self.update_retained {
-                self.retained.insert(i.def_id);
-            }
+        if self.update_retained {
+            self.retained.insert(i.def_id);
         }
-        i
+        Some(i)
     }
 }
 
@@ -123,7 +121,7 @@ crate struct ImplStripper<'a> {
 
 impl<'a> DocFolder for ImplStripper<'a> {
     fn fold_item(&mut self, i: Item) -> Option<Item> {
-        if let clean::ImplItem(ref imp) = i.kind {
+        if let clean::ImplItem(ref imp) = *i.kind {
             // emptied none trait impls can be stripped
             if imp.trait_.is_none() && imp.items.is_empty() {
                 return None;
@@ -153,7 +151,7 @@ impl<'a> DocFolder for ImplStripper<'a> {
                 }
             }
         }
-        self.fold_item_recur(i)
+        Some(self.fold_item_recur(i))
     }
 }
 
@@ -162,9 +160,9 @@ crate struct ImportStripper;
 
 impl DocFolder for ImportStripper {
     fn fold_item(&mut self, i: Item) -> Option<Item> {
-        match i.kind {
+        match *i.kind {
             clean::ExternCrateItem(..) | clean::ImportItem(..) if !i.visibility.is_public() => None,
-            _ => self.fold_item_recur(i),
+            _ => Some(self.fold_item_recur(i)),
         }
     }
 }

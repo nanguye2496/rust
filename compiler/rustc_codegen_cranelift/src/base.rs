@@ -12,6 +12,10 @@ pub(crate) fn codegen_fn<'tcx>(
 ) {
     let tcx = cx.tcx;
 
+    let _inst_guard =
+        crate::PrintOnPanic(|| format!("{:?} {}", instance, tcx.symbol_name(instance).name));
+    debug_assert!(!instance.substs.needs_infer());
+
     let mir = tcx.instance_mir(instance.def);
 
     // Declare function
@@ -114,6 +118,8 @@ pub(crate) fn codegen_fn<'tcx>(
     context.eliminate_unreachable_code(cx.module.isa()).unwrap();
     context.dce(cx.module.isa()).unwrap();
 
+    context.want_disasm = crate::pretty_clif::should_write_ir(tcx);
+
     // Define function
     let module = &mut cx.module;
     tcx.sess.time("define function", || {
@@ -135,6 +141,16 @@ pub(crate) fn codegen_fn<'tcx>(
         &context,
         &clif_comments,
     );
+
+    if let Some(mach_compile_result) = &context.mach_compile_result {
+        if let Some(disasm) = &mach_compile_result.disasm {
+            crate::pretty_clif::write_ir_file(
+                tcx,
+                &format!("{}.vcode", tcx.symbol_name(instance).name),
+                |file| file.write_all(disasm.as_bytes()),
+            )
+        }
+    }
 
     // Define debuginfo for function
     let isa = cx.module.isa();
@@ -303,7 +319,9 @@ fn codegen_fn_content(fx: &mut FunctionCx<'_, '_, impl Module>) {
             } => {
                 let discr = codegen_operand(fx, discr).load_scalar(fx);
 
-                if switch_ty.kind() == fx.tcx.types.bool.kind() {
+                let use_bool_opt = switch_ty.kind() == fx.tcx.types.bool.kind()
+                    || (targets.iter().count() == 1 && targets.iter().next().unwrap().0 == 0);
+                if use_bool_opt {
                     assert_eq!(targets.iter().count(), 1);
                     let (then_value, then_block) = targets.iter().next().unwrap();
                     let then_block = fx.get_block(then_block);
@@ -321,12 +339,22 @@ fn codegen_fn_content(fx: &mut FunctionCx<'_, '_, impl Module>) {
                     let discr = crate::optimize::peephole::maybe_unwrap_bint(&mut fx.bcx, discr);
                     let discr =
                         crate::optimize::peephole::make_branchable_value(&mut fx.bcx, discr);
-                    if test_zero {
-                        fx.bcx.ins().brz(discr, then_block, &[]);
-                        fx.bcx.ins().jump(else_block, &[]);
+                    if let Some(taken) = crate::optimize::peephole::maybe_known_branch_taken(
+                        &fx.bcx, discr, test_zero,
+                    ) {
+                        if taken {
+                            fx.bcx.ins().jump(then_block, &[]);
+                        } else {
+                            fx.bcx.ins().jump(else_block, &[]);
+                        }
                     } else {
-                        fx.bcx.ins().brnz(discr, then_block, &[]);
-                        fx.bcx.ins().jump(else_block, &[]);
+                        if test_zero {
+                            fx.bcx.ins().brz(discr, then_block, &[]);
+                            fx.bcx.ins().jump(else_block, &[]);
+                        } else {
+                            fx.bcx.ins().brnz(discr, then_block, &[]);
+                            fx.bcx.ins().jump(else_block, &[]);
+                        }
                     }
                 } else {
                     let mut switch = ::cranelift_frontend::Switch::new();
@@ -499,7 +527,8 @@ fn codegen_stmt<'tcx>(
                         UnOp::Neg => match layout.ty.kind() {
                             ty::Int(IntTy::I128) => {
                                 // FIXME remove this case once ineg.i128 works
-                                let zero = CValue::const_val(fx, layout, ty::ScalarInt::null(layout.size));
+                                let zero =
+                                    CValue::const_val(fx, layout, ty::ScalarInt::null(layout.size));
                                 crate::num::codegen_int_binop(fx, BinOp::Sub, zero, operand)
                             }
                             ty::Int(_) => CValue::by_val(fx.bcx.ins().ineg(val), layout),
@@ -509,7 +538,11 @@ fn codegen_stmt<'tcx>(
                     };
                     lval.write_cvalue(fx, res);
                 }
-                Rvalue::Cast(CastKind::Pointer(PointerCast::ReifyFnPointer), ref operand, to_ty) => {
+                Rvalue::Cast(
+                    CastKind::Pointer(PointerCast::ReifyFnPointer),
+                    ref operand,
+                    to_ty,
+                ) => {
                     let from_ty = fx.monomorphize(operand.ty(&fx.mir.local_decls, fx.tcx));
                     let to_layout = fx.layout_of(fx.monomorphize(to_ty));
                     match *from_ty.kind() {
@@ -530,9 +563,21 @@ fn codegen_stmt<'tcx>(
                         _ => bug!("Trying to ReifyFnPointer on non FnDef {:?}", from_ty),
                     }
                 }
-                Rvalue::Cast(CastKind::Pointer(PointerCast::UnsafeFnPointer), ref operand, to_ty)
-                | Rvalue::Cast(CastKind::Pointer(PointerCast::MutToConstPointer), ref operand, to_ty)
-                | Rvalue::Cast(CastKind::Pointer(PointerCast::ArrayToPointer), ref operand, to_ty) => {
+                Rvalue::Cast(
+                    CastKind::Pointer(PointerCast::UnsafeFnPointer),
+                    ref operand,
+                    to_ty,
+                )
+                | Rvalue::Cast(
+                    CastKind::Pointer(PointerCast::MutToConstPointer),
+                    ref operand,
+                    to_ty,
+                )
+                | Rvalue::Cast(
+                    CastKind::Pointer(PointerCast::ArrayToPointer),
+                    ref operand,
+                    to_ty,
+                ) => {
                     let to_layout = fx.layout_of(fx.monomorphize(to_ty));
                     let operand = codegen_operand(fx, operand);
                     lval.write_cvalue(fx, operand.cast_pointer_to(to_layout));

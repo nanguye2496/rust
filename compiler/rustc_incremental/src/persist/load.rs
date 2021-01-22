@@ -1,9 +1,9 @@
 //! Code to save/load the dep-graph from files.
 
 use rustc_data_structures::fx::FxHashMap;
+use rustc_hir::definitions::Definitions;
 use rustc_middle::dep_graph::{PreviousDepGraph, SerializedDepGraph, WorkProduct, WorkProductId};
 use rustc_middle::ty::query::OnDiskCache;
-use rustc_middle::ty::TyCtxt;
 use rustc_serialize::opaque::Decoder;
 use rustc_serialize::Decodable as RustcDecodable;
 use rustc_session::Session;
@@ -13,14 +13,6 @@ use super::data::*;
 use super::file_format;
 use super::fs::*;
 use super::work_product;
-
-pub fn dep_graph_tcx_init(tcx: TyCtxt<'_>) {
-    if !tcx.dep_graph.is_fully_enabled() {
-        return;
-    }
-
-    tcx.allocate_metadata_dep_nodes();
-}
 
 type WorkProductMap = FxHashMap<WorkProductId, WorkProduct>;
 
@@ -199,9 +191,17 @@ pub fn load_dep_graph(sess: &Session) -> DepGraphFuture {
     }))
 }
 
-pub fn load_query_result_cache(sess: &Session) -> OnDiskCache<'_> {
+/// Attempts to load the query result cache from disk
+///
+/// If we are not in incremental compilation mode, returns `None`.
+/// Otherwise, tries to load the query result cache from disk,
+/// creating an empty cache if it could not be loaded.
+pub fn load_query_result_cache<'a>(
+    sess: &'a Session,
+    definitions: &Definitions,
+) -> Option<OnDiskCache<'a>> {
     if sess.opts.incremental.is_none() {
-        return OnDiskCache::new_empty(sess.source_map());
+        return None;
     }
 
     let _prof_timer = sess.prof.generic_activity("incr_comp_load_query_result_cache");
@@ -211,7 +211,9 @@ pub fn load_query_result_cache(sess: &Session) -> OnDiskCache<'_> {
         &query_cache_path(sess),
         sess.is_nightly_build(),
     ) {
-        LoadResult::Ok { data: (bytes, start_pos) } => OnDiskCache::new(sess, bytes, start_pos),
-        _ => OnDiskCache::new_empty(sess.source_map()),
+        LoadResult::Ok { data: (bytes, start_pos) } => {
+            Some(OnDiskCache::new(sess, bytes, start_pos, definitions))
+        }
+        _ => Some(OnDiskCache::new_empty(sess.source_map())),
     }
 }

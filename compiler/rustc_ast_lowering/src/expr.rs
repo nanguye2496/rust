@@ -10,9 +10,9 @@ use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_session::parse::feature_err;
-use rustc_span::hygiene::ForLoopLoc;
 use rustc_span::source_map::{respan, DesugaringKind, Span, Spanned};
 use rustc_span::symbol::{sym, Ident, Symbol};
+use rustc_span::{hygiene::ForLoopLoc, DUMMY_SP};
 use rustc_target::asm;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
@@ -87,9 +87,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 ExprKind::Let(ref pat, ref scrutinee) => {
                     self.lower_expr_let(e.span, pat, scrutinee)
                 }
-                ExprKind::If(ref cond, ref then, ref else_opt) => {
-                    self.lower_expr_if(e.span, cond, then, else_opt.as_deref())
-                }
+                ExprKind::If(ref cond, ref then, ref else_opt) => match cond.kind {
+                    ExprKind::Let(ref pat, ref scrutinee) => {
+                        self.lower_expr_if_let(e.span, pat, scrutinee, then, else_opt.as_deref())
+                    }
+                    _ => self.lower_expr_if(cond, then, else_opt.as_deref()),
+                },
                 ExprKind::While(ref cond, ref body, opt_label) => self
                     .with_loop_scope(e.id, |this| {
                         this.lower_expr_while_in_loop_scope(e.span, cond, body, opt_label)
@@ -99,6 +102,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         this.lower_block(body, false),
                         opt_label,
                         hir::LoopSource::Loop,
+                        DUMMY_SP,
                     )
                 }),
                 ExprKind::TryBlock(ref body) => self.lower_expr_try_block(body),
@@ -337,8 +341,28 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
     fn lower_expr_if(
         &mut self,
-        span: Span,
         cond: &Expr,
+        then: &Block,
+        else_opt: Option<&Expr>,
+    ) -> hir::ExprKind<'hir> {
+        macro_rules! make_if {
+            ($opt:expr) => {{
+                let then_expr = self.lower_block_expr(then);
+                hir::ExprKind::If(self.lower_expr(cond), self.arena.alloc(then_expr), $opt)
+            }};
+        }
+        if let Some(rslt) = else_opt {
+            make_if!(Some(self.lower_expr(rslt)))
+        } else {
+            make_if!(None)
+        }
+    }
+
+    fn lower_expr_if_let(
+        &mut self,
+        span: Span,
+        pat: &Pat,
+        scrutinee: &Expr,
         then: &Block,
         else_opt: Option<&Expr>,
     ) -> hir::ExprKind<'hir> {
@@ -347,36 +371,19 @@ impl<'hir> LoweringContext<'_, 'hir> {
         // `_ => else_block` where `else_block` is `{}` if there's `None`:
         let else_pat = self.pat_wild(span);
         let (else_expr, contains_else_clause) = match else_opt {
-            None => (self.expr_block_empty(span), false),
+            None => (self.expr_block_empty(span.shrink_to_hi()), false),
             Some(els) => (self.lower_expr(els), true),
         };
         let else_arm = self.arm(else_pat, else_expr);
 
         // Handle then + scrutinee:
+        let scrutinee = self.lower_expr(scrutinee);
+        let then_pat = self.lower_pat(pat);
+
         let then_expr = self.lower_block_expr(then);
-        let (then_pat, scrutinee, desugar) = match cond.kind {
-            // `<pat> => <then>`:
-            ExprKind::Let(ref pat, ref scrutinee) => {
-                let scrutinee = self.lower_expr(scrutinee);
-                let pat = self.lower_pat(pat);
-                (pat, scrutinee, hir::MatchSource::IfLetDesugar { contains_else_clause })
-            }
-            // `true => <then>`:
-            _ => {
-                // Lower condition:
-                let cond = self.lower_expr(cond);
-                let span_block =
-                    self.mark_span_with_reason(DesugaringKind::CondTemporary, cond.span, None);
-                // Wrap in a construct equivalent to `{ let _t = $cond; _t }`
-                // to preserve drop semantics since `if cond { ... }` does not
-                // let temporaries live outside of `cond`.
-                let cond = self.expr_drop_temps(span_block, cond, ThinVec::new());
-                let pat = self.pat_bool(span, true);
-                (pat, cond, hir::MatchSource::IfDesugar { contains_else_clause })
-            }
-        };
         let then_arm = self.arm(then_pat, self.arena.alloc(then_expr));
 
+        let desugar = hir::MatchSource::IfLetDesugar { contains_else_clause };
         hir::ExprKind::Match(scrutinee, arena_vec![self; then_arm, else_arm], desugar)
     }
 
@@ -400,7 +407,6 @@ impl<'hir> LoweringContext<'_, 'hir> {
         };
 
         // Handle then + scrutinee:
-        let then_expr = self.lower_block_expr(body);
         let (then_pat, scrutinee, desugar, source) = match cond.kind {
             ExprKind::Let(ref pat, ref scrutinee) => {
                 // to:
@@ -440,6 +446,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 (pat, cond, hir::MatchSource::WhileDesugar, hir::LoopSource::While)
             }
         };
+        let then_expr = self.lower_block_expr(body);
         let then_arm = self.arm(then_pat, self.arena.alloc(then_expr));
 
         // `match <scrutinee> { ... }`
@@ -447,7 +454,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
             self.expr_match(span, scrutinee, arena_vec![self; then_arm, else_arm], desugar);
 
         // `[opt_ident]: loop { ... }`
-        hir::ExprKind::Loop(self.block_expr(self.arena.alloc(match_expr)), opt_label, source)
+        hir::ExprKind::Loop(
+            self.block_expr(self.arena.alloc(match_expr)),
+            opt_label,
+            source,
+            span.with_hi(cond.span.hi()),
+        )
     }
 
     /// Desugar `try { <stmts>; <expr> }` into `{ <stmts>; ::std::ops::Try::from_ok(<expr>) }`,
@@ -505,14 +517,19 @@ impl<'hir> LoweringContext<'_, 'hir> {
     }
 
     fn lower_arm(&mut self, arm: &Arm) -> hir::Arm<'hir> {
+        let pat = self.lower_pat(&arm.pat);
+        let guard = arm.guard.as_ref().map(|cond| {
+            if let ExprKind::Let(ref pat, ref scrutinee) = cond.kind {
+                hir::Guard::IfLet(self.lower_pat(pat), self.lower_expr(scrutinee))
+            } else {
+                hir::Guard::If(self.lower_expr(cond))
+            }
+        });
         hir::Arm {
             hir_id: self.next_id(),
             attrs: self.lower_attrs(&arm.attrs),
-            pat: self.lower_pat(&arm.pat),
-            guard: match arm.guard {
-                Some(ref x) => Some(hir::Guard::If(self.lower_expr(x))),
-                _ => None,
-            },
+            pat,
+            guard,
             body: self.lower_expr(&arm.body),
             span: arm.span,
         }
@@ -737,7 +754,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         // loop { .. }
         let loop_expr = self.arena.alloc(hir::Expr {
             hir_id: loop_hir_id,
-            kind: hir::ExprKind::Loop(loop_block, None, hir::LoopSource::Loop),
+            kind: hir::ExprKind::Loop(loop_block, None, hir::LoopSource::Loop, span),
             span,
             attrs: ThinVec::new(),
         });
@@ -1307,7 +1324,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         hir::InlineAsmOperand::Sym { expr: self.lower_expr_mut(expr) }
                     }
                 };
-                Some(op)
+                Some((op, *op_sp))
             })
             .collect();
 
@@ -1326,7 +1343,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             } = *p
             {
                 let op_sp = asm.operands[operand_idx].1;
-                match &operands[operand_idx] {
+                match &operands[operand_idx].0 {
                     hir::InlineAsmOperand::In { reg, .. }
                     | hir::InlineAsmOperand::Out { reg, .. }
                     | hir::InlineAsmOperand::InOut { reg, .. }
@@ -1385,8 +1402,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let mut used_input_regs = FxHashMap::default();
         let mut used_output_regs = FxHashMap::default();
         let mut required_features: Vec<&str> = vec![];
-        for (idx, op) in operands.iter().enumerate() {
-            let op_sp = asm.operands[idx].1;
+        for (idx, &(ref op, op_sp)) in operands.iter().enumerate() {
             if let Some(reg) = op.reg() {
                 // Make sure we don't accidentally carry features from the
                 // previous iteration.
@@ -1458,8 +1474,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                                     skip = true;
 
                                     let idx2 = *o.get();
-                                    let op2 = &operands[idx2];
-                                    let op_sp2 = asm.operands[idx2].1;
+                                    let &(ref op2, op_sp2) = &operands[idx2];
                                     let reg2 = match op2.reg() {
                                         Some(asm::InlineAsmRegOrRegClass::Reg(r)) => r,
                                         _ => unreachable!(),
@@ -1700,7 +1715,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
         );
 
         // `[opt_ident]: loop { ... }`
-        let kind = hir::ExprKind::Loop(loop_block, opt_label, hir::LoopSource::ForLoop);
+        let kind = hir::ExprKind::Loop(
+            loop_block,
+            opt_label,
+            hir::LoopSource::ForLoop,
+            e.span.with_hi(orig_head_span.hi()),
+        );
         let loop_expr = self.arena.alloc(hir::Expr {
             hir_id: self.lower_node_id(e.id),
             kind,

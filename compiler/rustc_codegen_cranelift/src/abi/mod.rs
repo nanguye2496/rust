@@ -64,7 +64,7 @@ pub(crate) fn fn_sig_for_fn_abi<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx
         ty::Generator(_, substs, _) => {
             let sig = substs.as_generator().poly_sig();
 
-            let env_region = ty::ReLateBound(ty::INNERMOST, ty::BrEnv);
+            let env_region = ty::ReLateBound(ty::INNERMOST, ty::BoundRegion { kind: ty::BrEnv });
             let env_ty = tcx.mk_mut_ref(tcx.mk_region(env_region), ty);
 
             let pin_did = tcx.require_lang_item(rustc_hir::LangItem::Pin, None);
@@ -214,10 +214,8 @@ pub(crate) fn get_function_name_and_sig<'tcx>(
     support_vararg: bool,
 ) -> (String, Signature) {
     assert!(!inst.substs.needs_infer());
-    let fn_sig = tcx.normalize_erasing_late_bound_regions(
-        ParamEnv::reveal_all(),
-        fn_sig_for_fn_abi(tcx, inst),
-    );
+    let fn_sig = tcx
+        .normalize_erasing_late_bound_regions(ParamEnv::reveal_all(), fn_sig_for_fn_abi(tcx, inst));
     if fn_sig.c_variadic && !support_vararg {
         tcx.sess.span_fatal(
             tcx.def_span(inst.def_id()),

@@ -20,6 +20,9 @@ members = [
   "src/tools/rust-installer",
   "src/tools/rust-demangler",
   "src/tools/cargo",
+  "src/tools/cargo/crates/credential/cargo-credential-1password",
+  "src/tools/cargo/crates/credential/cargo-credential-macos-keychain",
+  "src/tools/cargo/crates/credential/cargo-credential-wincred",
   "src/tools/rustdoc",
   "src/tools/rls",
   "src/tools/rustfmt",
@@ -28,6 +31,7 @@ members = [
   "src/tools/rustdoc-themes",
   "src/tools/unicode-table-generator",
   "src/tools/expand-yaml-anchors",
+  "src/tools/jsondocck",
 ]
 
 exclude = [

@@ -49,7 +49,7 @@ impl<'cx, 'tcx> AtExt<'tcx> for At<'cx, 'tcx> {
             self.param_env,
         );
         if !value.has_projections() {
-            return Ok(Normalized { value: value.clone(), obligations: vec![] });
+            return Ok(Normalized { value, obligations: vec![] });
         }
 
         let mut normalizer = QueryNormalizer {
@@ -97,6 +97,7 @@ impl<'cx, 'tcx> TypeFolder<'tcx> for QueryNormalizer<'cx, 'tcx> {
         self.infcx.tcx
     }
 
+    #[instrument(skip(self))]
     fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
         if !ty.has_projections() {
             return ty;

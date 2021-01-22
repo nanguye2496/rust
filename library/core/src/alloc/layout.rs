@@ -4,6 +4,12 @@ use crate::mem;
 use crate::num::NonZeroUsize;
 use crate::ptr::NonNull;
 
+// While this function is used in one place and its implementation
+// could be inlined, the previous attempts to do so made rustc
+// slower:
+//
+// * https://github.com/rust-lang/rust/pull/72189
+// * https://github.com/rust-lang/rust/pull/79827
 const fn size_align<T>() -> (usize, usize) {
     (mem::size_of::<T>(), mem::align_of::<T>())
 }
@@ -19,7 +25,7 @@ const fn size_align<T>() -> (usize, usize) {
 /// even though `GlobalAlloc` requires that all memory requests
 /// be non-zero in size. A caller must either ensure that conditions
 /// like this are met, use specific allocators with looser
-/// requirements, or use the more lenient `AllocRef` interface.)
+/// requirements, or use the more lenient `Allocator` interface.)
 #[stable(feature = "alloc_layout", since = "1.28.0")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[lang = "alloc_layout"]
@@ -50,7 +56,7 @@ impl Layout {
     ///    must not overflow (i.e., the rounded value must be less than
     ///    or equal to `usize::MAX`).
     #[stable(feature = "alloc_layout", since = "1.28.0")]
-    #[rustc_const_unstable(feature = "const_alloc_layout", issue = "67521")]
+    #[rustc_const_stable(feature = "const_alloc_layout", since = "1.50.0")]
     #[inline]
     pub const fn from_size_align(size: usize, align: usize) -> Result<Self, LayoutError> {
         if !align.is_power_of_two() {
@@ -96,7 +102,7 @@ impl Layout {
 
     /// The minimum size in bytes for a memory block of this layout.
     #[stable(feature = "alloc_layout", since = "1.28.0")]
-    #[rustc_const_unstable(feature = "const_alloc_layout", issue = "67521")]
+    #[rustc_const_stable(feature = "const_alloc_layout", since = "1.50.0")]
     #[inline]
     pub const fn size(&self) -> usize {
         self.size_
@@ -104,7 +110,7 @@ impl Layout {
 
     /// The minimum byte alignment for a memory block of this layout.
     #[stable(feature = "alloc_layout", since = "1.28.0")]
-    #[rustc_const_unstable(feature = "const_alloc_layout", issue = "67521")]
+    #[rustc_const_stable(feature = "const_alloc_layout", since = "1.50.0")]
     #[inline]
     pub const fn align(&self) -> usize {
         self.align_.get()

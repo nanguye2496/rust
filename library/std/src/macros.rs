@@ -8,6 +8,7 @@
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow_internal_unstable(libstd_sys_internals)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "std_panic_macro")]
 macro_rules! panic {
     () => ({ $crate::panic!("explicit panic") });
     ($msg:expr $(,)?) => ({ $crate::rt::begin_panic($msg) });
@@ -281,6 +282,10 @@ macro_rules! eprintln {
 #[macro_export]
 #[stable(feature = "dbg_macro", since = "1.32.0")]
 macro_rules! dbg {
+    // NOTE: We cannot use `concat!` to make a static string as a format argument
+    // of `eprintln!` because `file!` could contain a `{` or
+    // `$val` expression could be a block (`{ .. }`), in which case the `eprintln!`
+    // will be malformed.
     () => {
         $crate::eprintln!("[{}:{}]", $crate::file!(), $crate::line!());
     };

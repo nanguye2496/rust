@@ -6,13 +6,14 @@ use crate::fmt::Debug;
 use crate::rc::Rc;
 use crate::string::{String, ToString};
 use crate::vec::Vec;
+use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::iter::{self, FromIterator};
 use std::mem;
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
 use std::ops::RangeBounds;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 mod ord_chaos;
 use ord_chaos::{Cyclic3, Governed, Governor};
@@ -49,31 +50,30 @@ impl<K, V> BTreeMap<K, V> {
     // Panics if the map (or the code navigating it) is corrupted.
     fn check_invariants(&self) {
         if let Some(root) = &self.root {
-            let root_node = root.node_as_ref();
+            let root_node = root.reborrow();
 
             // Check the back pointers top-down, before we attempt to rely on
             // more serious navigation code.
             assert!(root_node.ascend().is_err());
             root_node.assert_back_pointers();
 
-            // Check consistenty of `length` and some of the navigation.
+            // Check consistency of `length` with what navigation code encounters.
             assert_eq!(self.length, root_node.calc_length());
-            assert_eq!(self.length, self.keys().count());
 
             // Lastly, check the invariant causing the least harm.
             root_node.assert_min_len(if root_node.height() > 0 { 1 } else { 0 });
         } else {
-            // Check consistenty of `length` and some of the navigation.
             assert_eq!(self.length, 0);
-            assert_eq!(self.length, self.keys().count());
         }
+
+        // Check that `assert_strictly_ascending` will encounter all keys.
+        assert_eq!(self.length, self.keys().count());
     }
 
     // Panics if the map is corrupted or if the keys are not in strictly
     // ascending order, in the current opinion of the `Ord` implementation.
-    // If the `Ord` implementation does not honor transitivity, this method
-    // does not guarantee that all the keys are unique, just that adjacent
-    // keys are unique.
+    // If the `Ord` implementation violates transitivity, this method does not
+    // guarantee that all keys are unique, just that adjacent keys are unique.
     fn check(&self)
     where
         K: Debug + Ord,
@@ -92,7 +92,7 @@ impl<K, V> BTreeMap<K, V> {
         K: Debug,
     {
         if let Some(root) = self.root.as_ref() {
-            root.node_as_ref().dump_keys()
+            root.reborrow().dump_keys()
         } else {
             String::from("not yet allocated")
         }
@@ -111,11 +111,23 @@ impl<K, V> BTreeMap<K, V> {
             }
         }
     }
+
+    // Transform the tree to minimize wasted space, obtaining fewer nodes that
+    // are mostly filled up to their capacity. The same compact tree could have
+    // been obtained by inserting keys in a shrewd order.
+    fn compact(&mut self)
+    where
+        K: Ord,
+    {
+        let iter = mem::take(self).into_iter();
+        let root = BTreeMap::ensure_is_owned(&mut self.root);
+        root.bulk_push(iter, &mut self.length);
+    }
 }
 
 impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::LeafOrInternal> {
     fn assert_min_len(self, min_len: usize) {
-        assert!(self.len() >= min_len, "{} < {}", self.len(), min_len);
+        assert!(self.len() >= min_len, "node len {} < {}", self.len(), min_len);
         if let node::ForceResult::Internal(node) = self.force() {
             for idx in 0..=node.len() {
                 let edge = unsafe { Handle::new_edge(node, idx) };
@@ -879,6 +891,7 @@ mod test_drain_filter {
         map.check();
     }
 
+    // Explicitly consumes the iterator, where most test cases drop it instantly.
     #[test]
     fn consumed_keeping_all() {
         let pairs = (0..3).map(|i| (i, i));
@@ -887,6 +900,7 @@ mod test_drain_filter {
         map.check();
     }
 
+    // Explicitly consumes the iterator, where most test cases drop it instantly.
     #[test]
     fn consumed_removing_all() {
         let pairs = (0..3).map(|i| (i, i));
@@ -896,15 +910,7 @@ mod test_drain_filter {
         map.check();
     }
 
-    #[test]
-    fn dropped_removing_all() {
-        let pairs = (0..3).map(|i| (i, i));
-        let mut map: BTreeMap<_, _> = pairs.collect();
-        map.drain_filter(|_, _| true);
-        assert!(map.is_empty());
-        map.check();
-    }
-
+    // Explicitly consumes the iterator and modifies values through it.
     #[test]
     fn mutating_and_keeping() {
         let pairs = (0..3).map(|i| (i, i));
@@ -921,6 +927,7 @@ mod test_drain_filter {
         map.check();
     }
 
+    // Explicitly consumes the iterator and modifies values through it.
     #[test]
     fn mutating_and_removing() {
         let pairs = (0..3).map(|i| (i, i));
@@ -1094,7 +1101,7 @@ mod test_drain_filter {
         struct D;
         impl Drop for D {
             fn drop(&mut self) {
-                if DROPS.fetch_add(1, Ordering::SeqCst) == 1 {
+                if DROPS.fetch_add(1, SeqCst) == 1 {
                     panic!("panic in `drop`");
                 }
             }
@@ -1105,14 +1112,14 @@ mod test_drain_filter {
 
         catch_unwind(move || {
             drop(map.drain_filter(|i, _| {
-                PREDS.fetch_add(1usize << i, Ordering::SeqCst);
+                PREDS.fetch_add(1usize << i, SeqCst);
                 true
             }))
         })
         .unwrap_err();
 
-        assert_eq!(PREDS.load(Ordering::SeqCst), 0x011);
-        assert_eq!(DROPS.load(Ordering::SeqCst), 3);
+        assert_eq!(PREDS.load(SeqCst), 0x011);
+        assert_eq!(DROPS.load(SeqCst), 3);
     }
 
     #[test]
@@ -1123,7 +1130,7 @@ mod test_drain_filter {
         struct D;
         impl Drop for D {
             fn drop(&mut self) {
-                DROPS.fetch_add(1, Ordering::SeqCst);
+                DROPS.fetch_add(1, SeqCst);
             }
         }
 
@@ -1132,7 +1139,7 @@ mod test_drain_filter {
 
         catch_unwind(AssertUnwindSafe(|| {
             drop(map.drain_filter(|i, _| {
-                PREDS.fetch_add(1usize << i, Ordering::SeqCst);
+                PREDS.fetch_add(1usize << i, SeqCst);
                 match i {
                     0 => true,
                     _ => panic!(),
@@ -1141,8 +1148,8 @@ mod test_drain_filter {
         }))
         .unwrap_err();
 
-        assert_eq!(PREDS.load(Ordering::SeqCst), 0x011);
-        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(PREDS.load(SeqCst), 0x011);
+        assert_eq!(DROPS.load(SeqCst), 1);
         assert_eq!(map.len(), 2);
         assert_eq!(map.first_entry().unwrap().key(), &4);
         assert_eq!(map.last_entry().unwrap().key(), &8);
@@ -1158,7 +1165,7 @@ mod test_drain_filter {
         struct D;
         impl Drop for D {
             fn drop(&mut self) {
-                DROPS.fetch_add(1, Ordering::SeqCst);
+                DROPS.fetch_add(1, SeqCst);
             }
         }
 
@@ -1167,7 +1174,7 @@ mod test_drain_filter {
 
         {
             let mut it = map.drain_filter(|i, _| {
-                PREDS.fetch_add(1usize << i, Ordering::SeqCst);
+                PREDS.fetch_add(1usize << i, SeqCst);
                 match i {
                     0 => true,
                     _ => panic!(),
@@ -1180,8 +1187,8 @@ mod test_drain_filter {
             assert!(matches!(result, Ok(None)));
         }
 
-        assert_eq!(PREDS.load(Ordering::SeqCst), 0x011);
-        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(PREDS.load(SeqCst), 0x011);
+        assert_eq!(DROPS.load(SeqCst), 1);
         assert_eq!(map.len(), 2);
         assert_eq!(map.first_entry().unwrap().key(), &4);
         assert_eq!(map.last_entry().unwrap().key(), &8);
@@ -1315,8 +1322,6 @@ fn test_zst() {
 // undefined.
 #[test]
 fn test_bad_zst() {
-    use std::cmp::Ordering;
-
     #[derive(Clone, Copy, Debug)]
     struct Bad;
 
@@ -1686,17 +1691,29 @@ fn test_first_last_entry() {
 }
 
 #[test]
-fn test_insert_into_full_left() {
-    let mut map: BTreeMap<_, _> = (0..NODE_CAPACITY).map(|i| (i * 2, ())).collect();
-    assert!(map.insert(NODE_CAPACITY, ()).is_none());
-    map.check();
+fn test_insert_into_full_height_0() {
+    let size = NODE_CAPACITY;
+    for pos in 0..=size {
+        let mut map: BTreeMap<_, _> = (0..size).map(|i| (i * 2 + 1, ())).collect();
+        assert!(map.insert(pos * 2, ()).is_none());
+        map.check();
+    }
 }
 
 #[test]
-fn test_insert_into_full_right() {
-    let mut map: BTreeMap<_, _> = (0..NODE_CAPACITY).map(|i| (i * 2, ())).collect();
-    assert!(map.insert(NODE_CAPACITY + 2, ()).is_none());
-    map.check();
+fn test_insert_into_full_height_1() {
+    let size = NODE_CAPACITY + 1 + NODE_CAPACITY;
+    for pos in 0..=size {
+        let mut map: BTreeMap<_, _> = (0..size).map(|i| (i * 2 + 1, ())).collect();
+        map.compact();
+        let root_node = map.root.as_ref().unwrap().reborrow();
+        assert_eq!(root_node.len(), 1);
+        assert_eq!(root_node.first_leaf_edge().into_node().len(), NODE_CAPACITY);
+        assert_eq!(root_node.last_leaf_edge().into_node().len(), NODE_CAPACITY);
+
+        assert!(map.insert(pos * 2, ()).is_none());
+        map.check();
+    }
 }
 
 macro_rules! create_append_test {
@@ -1763,7 +1780,7 @@ fn test_append_drop_leak() {
 
     impl Drop for D {
         fn drop(&mut self) {
-            if DROPS.fetch_add(1, Ordering::SeqCst) == 0 {
+            if DROPS.fetch_add(1, SeqCst) == 0 {
                 panic!("panic in `drop`");
             }
         }
@@ -1779,7 +1796,7 @@ fn test_append_drop_leak() {
 
     catch_unwind(move || left.append(&mut right)).unwrap_err();
 
-    assert_eq!(DROPS.load(Ordering::SeqCst), 4); // Rust issue #47949 ate one little piggy
+    assert_eq!(DROPS.load(SeqCst), 5);
 }
 
 #[test]
@@ -1804,7 +1821,6 @@ fn test_append_ord_chaos() {
 }
 
 fn rand_data(len: usize) -> Vec<(u32, u32)> {
-    assert!(len * 2 <= 70029); // from that point on numbers repeat
     let mut rng = DeterministicRng::new();
     Vec::from_iter((0..len).map(|_| (rng.next(), rng.next())))
 }
@@ -1870,6 +1886,25 @@ fn test_split_off_tiny_right_height_2() {
 }
 
 #[test]
+fn test_split_off_halfway() {
+    let mut rng = DeterministicRng::new();
+    for &len in &[NODE_CAPACITY, 25, 50, 75, 100] {
+        let mut data = Vec::from_iter((0..len).map(|_| (rng.next(), ())));
+        // Insertion in non-ascending order creates some variation in node length.
+        let mut map = BTreeMap::from_iter(data.iter().copied());
+        data.sort();
+        let small_keys = data.iter().take(len / 2).map(|kv| kv.0);
+        let large_keys = data.iter().skip(len / 2).map(|kv| kv.0);
+        let split_key = large_keys.clone().next().unwrap();
+        let right = map.split_off(&split_key);
+        map.check();
+        right.check();
+        assert!(map.keys().copied().eq(small_keys));
+        assert!(right.keys().copied().eq(large_keys));
+    }
+}
+
+#[test]
 fn test_split_off_large_random_sorted() {
     // Miri is too slow
     let mut data = if cfg!(miri) { rand_data(529) } else { rand_data(1529) };
@@ -1894,7 +1929,7 @@ fn test_into_iter_drop_leak_height_0() {
 
     impl Drop for D {
         fn drop(&mut self) {
-            if DROPS.fetch_add(1, Ordering::SeqCst) == 3 {
+            if DROPS.fetch_add(1, SeqCst) == 3 {
                 panic!("panic in `drop`");
             }
         }
@@ -1909,7 +1944,7 @@ fn test_into_iter_drop_leak_height_0() {
 
     catch_unwind(move || drop(map.into_iter())).unwrap_err();
 
-    assert_eq!(DROPS.load(Ordering::SeqCst), 5);
+    assert_eq!(DROPS.load(SeqCst), 5);
 }
 
 #[test]
@@ -1921,18 +1956,18 @@ fn test_into_iter_drop_leak_height_1() {
     struct D;
     impl Drop for D {
         fn drop(&mut self) {
-            if DROPS.fetch_add(1, Ordering::SeqCst) == PANIC_POINT.load(Ordering::SeqCst) {
+            if DROPS.fetch_add(1, SeqCst) == PANIC_POINT.load(SeqCst) {
                 panic!("panic in `drop`");
             }
         }
     }
 
     for panic_point in vec![0, 1, size - 2, size - 1] {
-        DROPS.store(0, Ordering::SeqCst);
-        PANIC_POINT.store(panic_point, Ordering::SeqCst);
+        DROPS.store(0, SeqCst);
+        PANIC_POINT.store(panic_point, SeqCst);
         let map: BTreeMap<_, _> = (0..size).map(|i| (i, D)).collect();
         catch_unwind(move || drop(map.into_iter())).unwrap_err();
-        assert_eq!(DROPS.load(Ordering::SeqCst), size);
+        assert_eq!(DROPS.load(SeqCst), size);
     }
 }
 

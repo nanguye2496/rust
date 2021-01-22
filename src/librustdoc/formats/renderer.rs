@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rustc_middle::ty::TyCtxt;
 use rustc_span::edition::Edition;
 
 use crate::clean;
@@ -10,7 +11,7 @@ use crate::formats::cache::{Cache, CACHE_KEY};
 /// Allows for different backends to rustdoc to be used with the `run_format()` function. Each
 /// backend renderer has hooks for initialization, documenting an item, entering and exiting a
 /// module, and cleanup/finalizing output.
-crate trait FormatRenderer: Clone {
+crate trait FormatRenderer<'tcx>: Clone {
     /// Sets up any state required for the renderer. When this is called the cache has already been
     /// populated.
     fn init(
@@ -19,6 +20,7 @@ crate trait FormatRenderer: Clone {
         render_info: RenderInfo,
         edition: Edition,
         cache: &mut Cache,
+        tcx: TyCtxt<'tcx>,
     ) -> Result<(Self, clean::Crate), Error>;
 
     /// Renders a single non-module item. This means no recursive sub-item rendering is required.
@@ -36,19 +38,24 @@ crate trait FormatRenderer: Clone {
     fn mod_item_out(&mut self, item_name: &str) -> Result<(), Error>;
 
     /// Post processing hook for cleanup and dumping output to files.
-    fn after_krate(&mut self, krate: &clean::Crate, cache: &Cache) -> Result<(), Error>;
-
-    /// Called after everything else to write out errors.
-    fn after_run(&mut self, diag: &rustc_errors::Handler) -> Result<(), Error>;
+    ///
+    /// A handler is available if the renderer wants to report errors.
+    fn after_krate(
+        &mut self,
+        krate: &clean::Crate,
+        cache: &Cache,
+        diag: &rustc_errors::Handler,
+    ) -> Result<(), Error>;
 }
 
 /// Main method for rendering a crate.
-crate fn run_format<T: FormatRenderer>(
+crate fn run_format<'tcx, T: FormatRenderer<'tcx>>(
     krate: clean::Crate,
     options: RenderOptions,
     render_info: RenderInfo,
     diag: &rustc_errors::Handler,
     edition: Edition,
+    tcx: TyCtxt<'tcx>,
 ) -> Result<(), Error> {
     let (krate, mut cache) = Cache::from_krate(
         render_info.clone(),
@@ -59,7 +66,7 @@ crate fn run_format<T: FormatRenderer>(
     );
 
     let (mut format_renderer, mut krate) =
-        T::init(krate, options, render_info, edition, &mut cache)?;
+        T::init(krate, options, render_info, edition, &mut cache, tcx)?;
 
     let cache = Arc::new(cache);
     // Freeze the cache now that the index has been built. Put an Arc into TLS for future
@@ -71,7 +78,7 @@ crate fn run_format<T: FormatRenderer>(
         None => return Ok(()),
     };
 
-    item.name = Some(krate.name.clone());
+    item.name = Some(krate.name);
 
     // Render the crate documentation
     let mut work = vec![(format_renderer.clone(), item)];
@@ -86,7 +93,7 @@ crate fn run_format<T: FormatRenderer>(
             }
 
             cx.mod_item_in(&item, &name, &cache)?;
-            let module = match item.kind {
+            let module = match *item.kind {
                 clean::StrippedItem(box clean::ModuleItem(m)) | clean::ModuleItem(m) => m,
                 _ => unreachable!(),
             };
@@ -101,6 +108,5 @@ crate fn run_format<T: FormatRenderer>(
         }
     }
 
-    format_renderer.after_krate(&krate, &cache)?;
-    format_renderer.after_run(diag)
+    format_renderer.after_krate(&krate, &cache, diag)
 }

@@ -42,10 +42,11 @@ impl<'tcx> MirPass<'tcx> for Inline {
         }
 
         if tcx.sess.opts.debugging_opts.instrument_coverage {
-            // The current implementation of source code coverage injects code region counters
-            // into the MIR, and assumes a 1-to-1 correspondence between MIR and source-code-
-            // based function.
-            debug!("function inlining is disabled when compiling with `instrument_coverage`");
+            // Since `Inline` happens after `InstrumentCoverage`, the function-specific coverage
+            // counters can be invalidated, such as by merging coverage counter statements from
+            // a pre-inlined function into a different function. This kind of change is invalid,
+            // so inlining must be skipped. Note: This check is performed here so inlining can
+            // be disabled without preventing other optimizations (regardless of `mir_opt_level`).
             return;
         }
 
@@ -254,6 +255,11 @@ impl Inliner<'tcx> {
             self.tcx.sess.opts.debugging_opts.inline_mir_threshold
         };
 
+        if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED) {
+            debug!("#[naked] present - not inlining");
+            return false;
+        }
+
         if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::COLD) {
             debug!("#[cold] present - not inlining");
             return false;
@@ -376,7 +382,7 @@ impl Inliner<'tcx> {
             // Cost of the var is the size in machine-words, if we know
             // it.
             if let Some(size) = type_size_of(tcx, self.param_env, ty) {
-                cost += (size / ptr_size) as usize;
+                cost += ((size + ptr_size - 1) / ptr_size) as usize;
             } else {
                 cost += UNKNOWN_SIZE_COST;
             }
@@ -745,11 +751,11 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
     }
 
     fn visit_span(&mut self, span: &mut Span) {
+        let mut expn_data =
+            ExpnData::default(ExpnKind::Inlined, *span, self.tcx.sess.edition(), None);
+        expn_data.def_site = self.body_span;
         // Make sure that all spans track the fact that they were inlined.
-        *span = self.callsite_span.fresh_expansion(ExpnData {
-            def_site: self.body_span,
-            ..ExpnData::default(ExpnKind::Inlined, *span, self.tcx.sess.edition(), None)
-        });
+        *span = self.callsite_span.fresh_expansion(expn_data);
     }
 
     fn visit_place(&mut self, place: &mut Place<'tcx>, context: PlaceContext, location: Location) {

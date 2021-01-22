@@ -100,7 +100,10 @@ fn codegen_static_ref<'tcx>(
     let global_ptr = fx.bcx.ins().global_value(fx.pointer_type, local_data_id);
     assert!(!layout.is_unsized(), "unsized statics aren't supported");
     assert!(
-        matches!(fx.bcx.func.global_values[local_data_id], GlobalValueData::Symbol { tls: false, ..}),
+        matches!(
+            fx.bcx.func.global_values[local_data_id],
+            GlobalValueData::Symbol { tls: false, .. }
+        ),
         "tls static referenced without Rvalue::ThreadLocalRef"
     );
     CPlace::for_ptr(crate::pointer::Pointer::new(global_ptr), layout)
@@ -163,10 +166,7 @@ pub(crate) fn codegen_const_value<'tcx>(
     assert!(!layout.is_unsized(), "sized const value");
 
     if layout.is_zst() {
-        return CValue::by_ref(
-            crate::Pointer::dangling(layout.align.pref),
-            layout,
-        );
+        return CValue::by_ref(crate::Pointer::dangling(layout.align.pref), layout);
     }
 
     match const_val {
@@ -186,9 +186,7 @@ pub(crate) fn codegen_const_value<'tcx>(
             }
 
             match x {
-                Scalar::Int(int) => {
-                    CValue::const_val(fx, layout, int)
-                }
+                Scalar::Int(int) => CValue::const_val(fx, layout, int),
                 Scalar::Ptr(ptr) => {
                     let alloc_kind = fx.tcx.get_global_alloc(ptr.alloc_id);
                     let base_addr = match alloc_kind {
@@ -452,7 +450,8 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut impl Module, cx: &mut Constan
             data_ctx.write_data_addr(offset.bytes() as u32, global_value, addend as i64);
         }
 
-        module.define_data(data_id, &data_ctx).unwrap();
+        // FIXME don't duplicate definitions in lazy jit mode
+        let _ = module.define_data(data_id, &data_ctx);
         cx.done.insert(data_id);
     }
 

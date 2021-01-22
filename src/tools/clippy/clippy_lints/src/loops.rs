@@ -2,12 +2,13 @@ use crate::consts::constant;
 use crate::utils::paths;
 use crate::utils::sugg::Sugg;
 use crate::utils::usage::{is_unused, mutated_variables};
+use crate::utils::visitors::LocalUsedVisitor;
 use crate::utils::{
     contains_name, get_enclosing_block, get_parent_expr, get_trait_def_id, has_iter_method, higher, implements_trait,
-    indent_of, is_integer_const, is_no_std_crate, is_refutable, is_type_diagnostic_item, last_path_segment,
-    match_trait_method, match_type, match_var, multispan_sugg, qpath_res, single_segment_path, snippet,
-    snippet_with_applicability, snippet_with_macro_callsite, span_lint, span_lint_and_help, span_lint_and_sugg,
-    span_lint_and_then, sugg, SpanlessEq,
+    indent_of, is_in_panic_handler, is_integer_const, is_no_std_crate, is_refutable, is_type_diagnostic_item,
+    last_path_segment, match_trait_method, match_type, match_var, multispan_sugg, qpath_res, single_segment_path,
+    snippet, snippet_with_applicability, snippet_with_macro_callsite, span_lint, span_lint_and_help,
+    span_lint_and_sugg, span_lint_and_then, sugg, SpanlessEq,
 };
 use if_chain::if_chain;
 use rustc_ast::ast;
@@ -217,7 +218,7 @@ declare_clippy_lint! {
     /// **Why is this bad?** The `while let` loop is usually shorter and more
     /// readable.
     ///
-    /// **Known problems:** Sometimes the wrong binding is displayed (#383).
+    /// **Known problems:** Sometimes the wrong binding is displayed ([#383](https://github.com/rust-lang/rust-clippy/issues/383)).
     ///
     /// **Example:**
     /// ```rust,no_run
@@ -532,7 +533,7 @@ impl<'tcx> LateLintPass<'tcx> for Loops {
         }
 
         // check for never_loop
-        if let ExprKind::Loop(ref block, _, _) = expr.kind {
+        if let ExprKind::Loop(ref block, _, _, _) = expr.kind {
             match never_loop_block(block, expr.hir_id) {
                 NeverLoopResult::AlwaysBreak => span_lint(cx, NEVER_LOOP, expr.span, "this loop never actually loops"),
                 NeverLoopResult::MayContinueMainLoop | NeverLoopResult::Otherwise => (),
@@ -542,18 +543,16 @@ impl<'tcx> LateLintPass<'tcx> for Loops {
         // check for `loop { if let {} else break }` that could be `while let`
         // (also matches an explicit "match" instead of "if let")
         // (even if the "match" or "if let" is used for declaration)
-        if let ExprKind::Loop(ref block, _, LoopSource::Loop) = expr.kind {
-            // also check for empty `loop {}` statements
-            // TODO(issue #6161): Enable for no_std crates (outside of #[panic_handler])
-            if block.stmts.is_empty() && block.expr.is_none() && !is_no_std_crate(cx.tcx.hir().krate()) {
-                span_lint_and_help(
-                    cx,
-                    EMPTY_LOOP,
-                    expr.span,
-                    "empty `loop {}` wastes CPU cycles",
-                    None,
-                    "You should either use `panic!()` or add `std::thread::sleep(..);` to the loop body.",
-                );
+        if let ExprKind::Loop(ref block, _, LoopSource::Loop, _) = expr.kind {
+            // also check for empty `loop {}` statements, skipping those in #[panic_handler]
+            if block.stmts.is_empty() && block.expr.is_none() && !is_in_panic_handler(cx, expr) {
+                let msg = "empty `loop {}` wastes CPU cycles";
+                let help = if is_no_std_crate(cx.tcx.hir().krate()) {
+                    "you should either use `panic!()` or add a call pausing or sleeping the thread to the loop body"
+                } else {
+                    "you should either use `panic!()` or add `std::thread::sleep(..);` to the loop body"
+                };
+                span_lint_and_help(cx, EMPTY_LOOP, expr.span, msg, None, help);
             }
 
             // extract the expression from the first statement (if any) in a block
@@ -739,9 +738,17 @@ fn never_loop_expr(expr: &Expr<'_>, main_loop_id: HirId) -> NeverLoopResult {
         | ExprKind::Assign(ref e1, ref e2, _)
         | ExprKind::AssignOp(_, ref e1, ref e2)
         | ExprKind::Index(ref e1, ref e2) => never_loop_expr_all(&mut [&**e1, &**e2].iter().cloned(), main_loop_id),
-        ExprKind::Loop(ref b, _, _) => {
+        ExprKind::Loop(ref b, _, _, _) => {
             // Break can come from the inner loop so remove them.
             absorb_break(&never_loop_block(b, main_loop_id))
+        },
+        ExprKind::If(ref e, ref e2, ref e3) => {
+            let e1 = never_loop_expr(e, main_loop_id);
+            let e2 = never_loop_expr(e2, main_loop_id);
+            let e3 = e3
+                .as_ref()
+                .map_or(NeverLoopResult::Otherwise, |e| never_loop_expr(e, main_loop_id));
+            combine_seq(e1, combine_branches(e2, e3))
         },
         ExprKind::Match(ref e, ref arms, _) => {
             let e = never_loop_expr(e, main_loop_id);
@@ -769,7 +776,7 @@ fn never_loop_expr(expr: &Expr<'_>, main_loop_id: HirId) -> NeverLoopResult {
         ExprKind::InlineAsm(ref asm) => asm
             .operands
             .iter()
-            .map(|o| match o {
+            .map(|(o, _)| match o {
                 InlineAsmOperand::In { expr, .. }
                 | InlineAsmOperand::InOut { expr, .. }
                 | InlineAsmOperand::Const { expr }
@@ -1307,7 +1314,7 @@ impl<'a, 'tcx> Visitor<'tcx> for SameItemPushVisitor<'a, 'tcx> {
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
         match &expr.kind {
             // Non-determinism may occur ... don't give a lint
-            ExprKind::Loop(_, _, _) | ExprKind::Match(_, _, _) => self.should_lint = false,
+            ExprKind::Loop(..) | ExprKind::Match(..) => self.should_lint = false,
             ExprKind::Block(block, _) => self.visit_block(block),
             _ => {},
         }
@@ -1921,8 +1928,7 @@ fn check_for_single_element_loop<'tcx>(
     if_chain! {
         if let ExprKind::AddrOf(BorrowKind::Ref, _, ref arg_expr) = arg.kind;
         if let PatKind::Binding(.., target, _) = pat.kind;
-        if let ExprKind::Array(ref arg_expr_list) = arg_expr.kind;
-        if let [arg_expression] = arg_expr_list;
+        if let ExprKind::Array([arg_expression]) = arg_expr.kind;
         if let ExprKind::Path(ref list_item) = arg_expression.kind;
         if let Some(list_item_name) = single_segment_path(list_item).map(|ps| ps.ident.name);
         if let ExprKind::Block(ref block, _) = body.kind;
@@ -2027,8 +2033,7 @@ fn check_for_mutability(cx: &LateContext<'_>, bound: &Expr<'_>) -> Option<HirId>
                 let node_str = cx.tcx.hir().get(hir_id);
                 if_chain! {
                     if let Node::Binding(pat) = node_str;
-                    if let PatKind::Binding(bind_ann, ..) = pat.kind;
-                    if let BindingAnnotation::Mutable = bind_ann;
+                    if let PatKind::Binding(BindingAnnotation::Mutable, ..) = pat.kind;
                     then {
                         return Some(hir_id);
                     }
@@ -2073,28 +2078,6 @@ fn pat_is_wild<'tcx>(pat: &'tcx PatKind<'_>, body: &'tcx Expr<'_>) -> bool {
     }
 }
 
-struct LocalUsedVisitor<'a, 'tcx> {
-    cx: &'a LateContext<'tcx>,
-    local: HirId,
-    used: bool,
-}
-
-impl<'a, 'tcx> Visitor<'tcx> for LocalUsedVisitor<'a, 'tcx> {
-    type Map = Map<'tcx>;
-
-    fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
-        if same_var(self.cx, expr, self.local) {
-            self.used = true;
-        } else {
-            walk_expr(self, expr);
-        }
-    }
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
-    }
-}
-
 struct VarVisitor<'a, 'tcx> {
     /// context reference
     cx: &'a LateContext<'tcx>,
@@ -2128,11 +2111,7 @@ impl<'a, 'tcx> VarVisitor<'a, 'tcx> {
             then {
                 let index_used_directly = same_var(self.cx, idx, self.var);
                 let indexed_indirectly = {
-                    let mut used_visitor = LocalUsedVisitor {
-                        cx: self.cx,
-                        local: self.var,
-                        used: false,
-                    };
+                    let mut used_visitor = LocalUsedVisitor::new(self.var);
                     walk_expr(&mut used_visitor, idx);
                     used_visitor.used
                 };
@@ -2623,7 +2602,7 @@ fn is_loop(expr: &Expr<'_>) -> bool {
 }
 
 fn is_conditional(expr: &Expr<'_>) -> bool {
-    matches!(expr.kind, ExprKind::Match(..))
+    matches!(expr.kind, ExprKind::If(..) | ExprKind::Match(..))
 }
 
 fn is_nested(cx: &LateContext<'_>, match_expr: &Expr<'_>, iter_expr: &Expr<'_>) -> bool {
@@ -2952,7 +2931,7 @@ fn check_needless_collect_indirect_usage<'tcx>(expr: &'tcx Expr<'_>, cx: &LateCo
         for ref stmt in block.stmts {
             if_chain! {
                 if let StmtKind::Local(
-                    Local { pat: Pat { kind: PatKind::Binding(_, _, ident, .. ), .. },
+                    Local { pat: Pat { hir_id: pat_id, kind: PatKind::Binding(_, _, ident, .. ), .. },
                     init: Some(ref init_expr), .. }
                 ) = stmt.kind;
                 if let ExprKind::MethodCall(ref method_name, _, &[ref iter_source], ..) = init_expr.kind;
@@ -2966,6 +2945,16 @@ fn check_needless_collect_indirect_usage<'tcx>(expr: &'tcx Expr<'_>, cx: &LateCo
                 if let Some(iter_calls) = detect_iter_and_into_iters(block, *ident);
                 if iter_calls.len() == 1;
                 then {
+                    let mut used_count_visitor = UsedCountVisitor {
+                        cx,
+                        id: *pat_id,
+                        count: 0,
+                    };
+                    walk_block(&mut used_count_visitor, block);
+                    if used_count_visitor.count > 1 {
+                        return;
+                    }
+
                     // Suggest replacing iter_call with iter_replacement, and removing stmt
                     let iter_call = &iter_calls[0];
                     span_lint_and_then(
@@ -3086,6 +3075,28 @@ impl<'tcx> Visitor<'tcx> for IterFunctionVisitor {
     type Map = Map<'tcx>;
     fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
         NestedVisitorMap::None
+    }
+}
+
+struct UsedCountVisitor<'a, 'tcx> {
+    cx: &'a LateContext<'tcx>,
+    id: HirId,
+    count: usize,
+}
+
+impl<'a, 'tcx> Visitor<'tcx> for UsedCountVisitor<'a, 'tcx> {
+    type Map = Map<'tcx>;
+
+    fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
+        if same_var(self.cx, expr, self.id) {
+            self.count += 1;
+        } else {
+            walk_expr(self, expr);
+        }
+    }
+
+    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
+        NestedVisitorMap::OnlyBodies(self.cx.tcx.hir())
     }
 }
 

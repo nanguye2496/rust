@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
+
+use rustc_data_structures::fx::FxHashMap;
 
 use crate::externalfiles::ExternalHtml;
 use crate::html::escape::Escape;
@@ -11,7 +12,7 @@ crate struct Layout {
     crate logo: String,
     crate favicon: String,
     crate external_html: ExternalHtml,
-    crate default_settings: HashMap<String, String>,
+    crate default_settings: FxHashMap<String, String>,
     crate krate: String,
     /// The given user css file which allow to customize the generated
     /// documentation theme.
@@ -98,7 +99,7 @@ crate fn render<T: Print, S: Print>(
                            placeholder=\"Click or press ‘S’ to search, ‘?’ for more options…\" \
                            type=\"search\">\
                 </div>\
-                <span class=\"help-button\">?</span>
+                <button type=\"button\" class=\"help-button\">?</button>
                 <a id=\"settings-menu\" href=\"{root_path}settings.html\">\
                     <img src=\"{static_root_path}wheel{suffix}.svg\" \
                          width=\"18\" \
@@ -111,10 +112,7 @@ crate fn render<T: Print, S: Print>(
     <section id=\"search\" class=\"content hidden\"></section>\
     <section class=\"footer\"></section>\
     {after_content}\
-    <script>\
-        window.rootPath = \"{root_path}\";\
-        window.currentCrate = \"{krate}\";\
-    </script>\
+    <div id=\"rustdoc-vars\" data-root-path=\"{root_path}\" data-current-crate=\"{krate}\"></div>
     <script src=\"{static_root_path}main{suffix}.js\"></script>\
     {static_extra_scripts}\
     {extra_scripts}\

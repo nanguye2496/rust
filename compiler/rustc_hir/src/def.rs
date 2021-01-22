@@ -5,6 +5,7 @@ use rustc_ast as ast;
 use rustc_ast::NodeId;
 use rustc_macros::HashStable_Generic;
 use rustc_span::hygiene::MacroKind;
+use rustc_span::Symbol;
 
 use std::array::IntoIter;
 use std::fmt::Debug;
@@ -34,11 +35,14 @@ pub enum CtorKind {
 #[derive(HashStable_Generic)]
 pub enum NonMacroAttrKind {
     /// Single-segment attribute defined by the language (`#[inline]`)
-    Builtin,
+    Builtin(Symbol),
     /// Multi-segment custom attribute living in a "tool module" (`#[rustfmt::skip]`).
     Tool,
     /// Single-segment custom attribute registered by a derive macro (`#[serde(default)]`).
     DeriveHelper,
+    /// Single-segment custom attribute registered by a derive macro
+    /// but used before that derive macro was expanded (deprecated).
+    DeriveHelperCompat,
     /// Single-segment custom attribute registered with `#[register_attr]`.
     Registered,
 }
@@ -368,9 +372,11 @@ impl CtorKind {
 impl NonMacroAttrKind {
     pub fn descr(self) -> &'static str {
         match self {
-            NonMacroAttrKind::Builtin => "built-in attribute",
+            NonMacroAttrKind::Builtin(..) => "built-in attribute",
             NonMacroAttrKind::Tool => "tool attribute",
-            NonMacroAttrKind::DeriveHelper => "derive helper attribute",
+            NonMacroAttrKind::DeriveHelper | NonMacroAttrKind::DeriveHelperCompat => {
+                "derive helper attribute"
+            }
             NonMacroAttrKind::Registered => "explicitly registered attribute",
         }
     }
@@ -385,8 +391,10 @@ impl NonMacroAttrKind {
     /// Users of some attributes cannot mark them as used, so they are considered always used.
     pub fn is_used(self) -> bool {
         match self {
-            NonMacroAttrKind::Tool | NonMacroAttrKind::DeriveHelper => true,
-            NonMacroAttrKind::Builtin | NonMacroAttrKind::Registered => false,
+            NonMacroAttrKind::Tool
+            | NonMacroAttrKind::DeriveHelper
+            | NonMacroAttrKind::DeriveHelperCompat => true,
+            NonMacroAttrKind::Builtin(..) | NonMacroAttrKind::Registered => false,
         }
     }
 }

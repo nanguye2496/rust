@@ -31,7 +31,7 @@ pub struct Entry<'hir> {
 impl<'hir> Entry<'hir> {
     fn parent_node(self) -> Option<HirId> {
         match self.node {
-            Node::Crate(_) | Node::MacroDef(_) => None,
+            Node::Crate(_) => None,
             _ => Some(self.parent),
         }
     }
@@ -47,7 +47,7 @@ fn fn_decl<'hir>(node: Node<'hir>) -> Option<&'hir FnDecl<'hir>> {
     }
 }
 
-fn fn_sig<'hir>(node: Node<'hir>) -> Option<&'hir FnSig<'hir>> {
+pub fn fn_sig<'hir>(node: Node<'hir>) -> Option<&'hir FnSig<'hir>> {
     match &node {
         Node::Item(Item { kind: ItemKind::Fn(sig, _, _), .. })
         | Node::TraitItem(TraitItem { kind: TraitItemKind::Fn(sig, _), .. })
@@ -205,7 +205,7 @@ impl<'hir> Map<'hir> {
                 ItemKind::TraitAlias(..) => DefKind::TraitAlias,
                 ItemKind::ExternCrate(_) => DefKind::ExternCrate,
                 ItemKind::Use(..) => DefKind::Use,
-                ItemKind::ForeignMod(..) => DefKind::ForeignMod,
+                ItemKind::ForeignMod { .. } => DefKind::ForeignMod,
                 ItemKind::GlobalAsm(..) => DefKind::GlobalAsm,
                 ItemKind::Impl { .. } => DefKind::Impl,
             },
@@ -309,6 +309,13 @@ impl<'hir> Map<'hir> {
         }
     }
 
+    pub fn foreign_item(&self, id: ForeignItemId) -> &'hir ForeignItem<'hir> {
+        match self.find(id.hir_id).unwrap() {
+            Node::ForeignItem(item) => item,
+            _ => bug!(),
+        }
+    }
+
     pub fn body(&self, id: BodyId) -> &'hir Body<'hir> {
         self.tcx.hir_owner_nodes(id.hir_id.owner).unwrap().bodies.get(&id.hir_id.local_id).unwrap()
     }
@@ -372,7 +379,7 @@ impl<'hir> Map<'hir> {
     pub fn body_param_names(&self, id: BodyId) -> impl Iterator<Item = Ident> + 'hir {
         self.body(id).params.iter().map(|arg| match arg.pat.kind {
             PatKind::Binding(_, _, ident, _) => ident,
-            _ => Ident::new(kw::Invalid, rustc_span::DUMMY_SP),
+            _ => Ident::new(kw::Empty, rustc_span::DUMMY_SP),
         })
     }
 
@@ -470,6 +477,10 @@ impl<'hir> Map<'hir> {
         for id in &module.impl_items {
             visitor.visit_impl_item(self.expect_impl_item(id.hir_id));
         }
+
+        for id in &module.foreign_items {
+            visitor.visit_foreign_item(self.expect_foreign_item(id.hir_id));
+        }
     }
 
     /// Retrieves the `Node` corresponding to `id`, panicking if it cannot be found.
@@ -494,7 +505,7 @@ impl<'hir> Map<'hir> {
                     | ItemKind::Union(_, generics)
                     | ItemKind::Trait(_, _, generics, ..)
                     | ItemKind::TraitAlias(generics, _)
-                    | ItemKind::Impl { generics, .. },
+                    | ItemKind::Impl(Impl { generics, .. }),
                 ..
             }) => Some(generics),
             _ => None,
@@ -647,12 +658,12 @@ impl<'hir> Map<'hir> {
         CRATE_HIR_ID
     }
 
-    /// When on a match arm tail expression or on a match arm, give back the enclosing `match`
-    /// expression.
+    /// When on an if expression, a match arm tail expression or a match arm, give back
+    /// the enclosing `if` or `match` expression.
     ///
-    /// Used by error reporting when there's a type error in a match arm caused by the `match`
+    /// Used by error reporting when there's a type error in an if or match arm caused by the
     /// expression needing to be unit.
-    pub fn get_match_if_cause(&self, hir_id: HirId) -> Option<&'hir Expr<'hir>> {
+    pub fn get_if_cause(&self, hir_id: HirId) -> Option<&'hir Expr<'hir>> {
         for (_, node) in self.parent_iter(hir_id) {
             match node {
                 Node::Item(_)
@@ -660,7 +671,9 @@ impl<'hir> Map<'hir> {
                 | Node::TraitItem(_)
                 | Node::ImplItem(_)
                 | Node::Stmt(Stmt { kind: StmtKind::Local(_), .. }) => break,
-                Node::Expr(expr @ Expr { kind: ExprKind::Match(..), .. }) => return Some(expr),
+                Node::Expr(expr @ Expr { kind: ExprKind::If(..) | ExprKind::Match(..), .. }) => {
+                    return Some(expr);
+                }
                 _ => {}
             }
         }
@@ -699,15 +712,10 @@ impl<'hir> Map<'hir> {
         let mut scope = id;
         loop {
             scope = self.get_enclosing_scope(scope).unwrap_or(CRATE_HIR_ID);
-            if scope == CRATE_HIR_ID {
-                return CRATE_HIR_ID;
-            }
-            match self.get(scope) {
-                Node::Block(_) => {}
-                _ => break,
+            if scope == CRATE_HIR_ID || !matches!(self.get(scope), Node::Block(_)) {
+                return scope;
             }
         }
-        scope
     }
 
     pub fn get_parent_did(&self, id: HirId) -> LocalDefId {
@@ -718,10 +726,11 @@ impl<'hir> Map<'hir> {
         let parent = self.get_parent_item(hir_id);
         if let Some(entry) = self.find_entry(parent) {
             if let Entry {
-                node: Node::Item(Item { kind: ItemKind::ForeignMod(ref nm), .. }), ..
+                node: Node::Item(Item { kind: ItemKind::ForeignMod { abi, .. }, .. }),
+                ..
             } = entry
             {
-                return nm.abi;
+                return *abi;
             }
         }
         bug!("expected foreign mod or inlined parent, found {}", self.node_to_string(parent))
@@ -806,7 +815,7 @@ impl<'hir> Map<'hir> {
     /// Given a node ID, gets a list of attributes associated with the AST
     /// corresponding to the node-ID.
     pub fn attrs(&self, id: HirId) -> &'hir [ast::Attribute] {
-        let attrs = self.find_entry(id).map(|entry| match entry.node {
+        self.find_entry(id).map_or(&[], |entry| match entry.node {
             Node::Param(a) => &a.attrs[..],
             Node::Local(l) => &l.attrs[..],
             Node::Item(i) => &i.attrs[..],
@@ -833,8 +842,7 @@ impl<'hir> Map<'hir> {
             | Node::Block(..)
             | Node::Lifetime(..)
             | Node::Visibility(..) => &[],
-        });
-        attrs.unwrap_or(&[])
+        })
     }
 
     /// Gets the span of the definition of the specified HIR node.
@@ -937,6 +945,10 @@ impl<'hir> intravisit::Map<'hir> for Map<'hir> {
     fn impl_item(&self, id: ImplItemId) -> &'hir ImplItem<'hir> {
         self.impl_item(id)
     }
+
+    fn foreign_item(&self, id: ForeignItemId) -> &'hir ForeignItem<'hir> {
+        self.foreign_item(id)
+    }
 }
 
 trait Named {
@@ -1030,7 +1042,7 @@ fn hir_id_to_string(map: &Map<'_>, id: HirId) -> String {
                 ItemKind::Const(..) => "const",
                 ItemKind::Fn(..) => "fn",
                 ItemKind::Mod(..) => "mod",
-                ItemKind::ForeignMod(..) => "foreign mod",
+                ItemKind::ForeignMod { .. } => "foreign mod",
                 ItemKind::GlobalAsm(..) => "global asm",
                 ItemKind::TyAlias(..) => "ty",
                 ItemKind::OpaqueTy(..) => "opaque type",

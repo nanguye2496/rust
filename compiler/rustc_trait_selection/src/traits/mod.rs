@@ -97,13 +97,13 @@ impl Default for SkipLeakCheck {
 /// The mode that trait queries run in.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TraitQueryMode {
-    // Standard/un-canonicalized queries get accurate
-    // spans etc. passed in and hence can do reasonable
-    // error reporting on their own.
+    /// Standard/un-canonicalized queries get accurate
+    /// spans etc. passed in and hence can do reasonable
+    /// error reporting on their own.
     Standard,
-    // Canonicalized queries get dummy spans and hence
-    // must generally propagate errors to
-    // pre-canonicalization callsites.
+    /// Canonicalized queries get dummy spans and hence
+    /// must generally propagate errors to
+    /// pre-canonicalization callsites.
     Canonical,
 }
 
@@ -323,9 +323,8 @@ pub fn normalize_param_env_or_error<'tcx>(
     // This works fairly well because trait matching  does not actually care about param-env
     // TypeOutlives predicates - these are normally used by regionck.
     let outlives_predicates: Vec<_> = predicates
-        .drain_filter(|predicate| match predicate.skip_binders() {
-            ty::PredicateAtom::TypeOutlives(..) => true,
-            _ => false,
+        .drain_filter(|predicate| {
+            matches!(predicate.kind().skip_binder(), ty::PredicateKind::TypeOutlives(..))
         })
         .collect();
 

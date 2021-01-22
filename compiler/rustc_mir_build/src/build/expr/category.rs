@@ -38,13 +38,14 @@ impl Category {
             ExprKind::Field { .. }
             | ExprKind::Deref { .. }
             | ExprKind::Index { .. }
-            | ExprKind::SelfRef
+            | ExprKind::UpvarRef { .. }
             | ExprKind::VarRef { .. }
             | ExprKind::PlaceTypeAscription { .. }
             | ExprKind::ValueTypeAscription { .. } => Some(Category::Place),
 
             ExprKind::LogicalOp { .. }
             | ExprKind::Match { .. }
+            | ExprKind::If { .. }
             | ExprKind::NeverToAny { .. }
             | ExprKind::Use { .. }
             | ExprKind::Adt { .. }

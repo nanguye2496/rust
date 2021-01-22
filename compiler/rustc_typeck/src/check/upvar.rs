@@ -176,7 +176,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.demand_eqtype(span, inferred_kind.to_ty(self.tcx), closure_kind_ty);
 
             // If we have an origin, store it.
-            if let Some(origin) = delegate.current_origin {
+            if let Some(origin) = delegate.current_origin.clone() {
+                let origin = if self.tcx.features().capture_disjoint_fields {
+                    origin
+                } else {
+                    // FIXME(project-rfc-2229#26): Once rust-lang#80092 is merged, we should restrict the
+                    // precision of origin as well. Otherwise, this will cause issues when project-rfc-2229#26
+                    // is fixed as we might see Index projections in the origin, which we can't print because
+                    // we don't store enough information.
+                    (origin.0, Place { projections: vec![], ..origin.1 })
+                };
+
                 self.typeck_results
                     .borrow_mut()
                     .closure_kind_origins_mut()
@@ -202,7 +212,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // inference algorithm will reject it).
 
         // Equate the type variables for the upvars with the actual types.
-        let final_upvar_tys = self.final_upvar_tys(closure_hir_id);
+        let final_upvar_tys = self.final_upvar_tys(closure_def_id);
         debug!(
             "analyze_closure: id={:?} substs={:?} final_upvar_tys={:?}",
             closure_hir_id, substs, final_upvar_tys
@@ -222,36 +232,33 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     // Returns a list of `Ty`s for each upvar.
-    fn final_upvar_tys(&self, closure_id: hir::HirId) -> Vec<Ty<'tcx>> {
+    fn final_upvar_tys(&self, closure_id: DefId) -> Vec<Ty<'tcx>> {
         // Presently an unboxed closure type cannot "escape" out of a
         // function, so we will only encounter ones that originated in the
         // local crate or were inlined into it along with some function.
         // This may change if abstract return types of some sort are
         // implemented.
         let tcx = self.tcx;
-        let closure_def_id = tcx.hir().local_def_id(closure_id);
 
         self.typeck_results
             .borrow()
-            .closure_captures
-            .get(&closure_def_id.to_def_id())
-            .iter()
-            .flat_map(|upvars| {
-                upvars.iter().map(|(&var_hir_id, _)| {
-                    let upvar_ty = self.node_ty(var_hir_id);
-                    let upvar_id = ty::UpvarId::new(var_hir_id, closure_def_id);
-                    let capture = self.typeck_results.borrow().upvar_capture(upvar_id);
+            .closure_min_captures_flattened(closure_id)
+            .map(|captured_place| {
+                let upvar_ty = captured_place.place.ty();
+                let capture = captured_place.info.capture_kind;
 
-                    debug!("var_id={:?} upvar_ty={:?} capture={:?}", var_hir_id, upvar_ty, capture);
+                debug!(
+                    "place={:?} upvar_ty={:?} capture={:?}",
+                    captured_place.place, upvar_ty, capture
+                );
 
-                    match capture {
-                        ty::UpvarCapture::ByValue(_) => upvar_ty,
-                        ty::UpvarCapture::ByRef(borrow) => tcx.mk_ref(
-                            borrow.region,
-                            ty::TypeAndMut { ty: upvar_ty, mutbl: borrow.kind.to_mutbl_lossy() },
-                        ),
-                    }
-                })
+                match capture {
+                    ty::UpvarCapture::ByValue(_) => upvar_ty,
+                    ty::UpvarCapture::ByRef(borrow) => tcx.mk_ref(
+                        borrow.region,
+                        ty::TypeAndMut { ty: upvar_ty, mutbl: borrow.kind.to_mutbl_lossy() },
+                    ),
+                }
             })
             .collect()
     }
@@ -297,17 +304,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                     closure_captures.insert(*var_hir_id, upvar_id);
 
-                    let new_capture_kind = if let Some(capture_kind) =
-                        upvar_capture_map.get(&upvar_id)
-                    {
-                        // upvar_capture_map only stores the UpvarCapture (CaptureKind),
-                        // so we create a fake capture info with no expression.
-                        let fake_capture_info =
-                            ty::CaptureInfo { expr_id: None, capture_kind: capture_kind.clone() };
-                        determine_capture_info(fake_capture_info, capture_info).capture_kind
-                    } else {
-                        capture_info.capture_kind
-                    };
+                    let new_capture_kind =
+                        if let Some(capture_kind) = upvar_capture_map.get(&upvar_id) {
+                            // upvar_capture_map only stores the UpvarCapture (CaptureKind),
+                            // so we create a fake capture info with no expression.
+                            let fake_capture_info =
+                                ty::CaptureInfo { expr_id: None, capture_kind: *capture_kind };
+                            determine_capture_info(fake_capture_info, capture_info).capture_kind
+                        } else {
+                            capture_info.capture_kind
+                        };
                     upvar_capture_map.insert(upvar_id, new_capture_kind);
                 }
             }
@@ -394,7 +400,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             let min_cap_list = match root_var_min_capture_list.get_mut(&var_hir_id) {
                 None => {
-                    let min_cap_list = vec![ty::CapturedPlace { place: place, info: capture_info }];
+                    let min_cap_list = vec![ty::CapturedPlace { place, info: capture_info }];
                     root_var_min_capture_list.insert(var_hir_id, min_cap_list);
                     continue;
                 }
@@ -567,7 +573,7 @@ struct InferBorrowKind<'a, 'tcx> {
 
     // If we modified `current_closure_kind`, this field contains a `Some()` with the
     // variable access that caused us to do so.
-    current_origin: Option<(Span, Symbol)>,
+    current_origin: Option<(Span, Place<'tcx>)>,
 
     /// For each Place that is captured by the closure, we track the minimal kind of
     /// access we need (ref, ref mut, move, etc) and the expression that resulted in such access.
@@ -632,7 +638,7 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
             upvar_id.closure_expr_id,
             ty::ClosureKind::FnOnce,
             usage_span,
-            var_name(tcx, upvar_id.var_path.hir_id),
+            place_with_id.place.clone(),
         );
 
         let capture_info = ty::CaptureInfo {
@@ -724,7 +730,7 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
                 upvar_id.closure_expr_id,
                 ty::ClosureKind::FnMut,
                 tcx.hir().span(diag_expr_id),
-                var_name(tcx, upvar_id.var_path.hir_id),
+                place_with_id.place.clone(),
             );
         }
     }
@@ -769,11 +775,11 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
         closure_id: LocalDefId,
         new_kind: ty::ClosureKind,
         upvar_span: Span,
-        var_name: Symbol,
+        place: Place<'tcx>,
     ) {
         debug!(
-            "adjust_closure_kind(closure_id={:?}, new_kind={:?}, upvar_span={:?}, var_name={})",
-            closure_id, new_kind, upvar_span, var_name
+            "adjust_closure_kind(closure_id={:?}, new_kind={:?}, upvar_span={:?}, place={:?})",
+            closure_id, new_kind, upvar_span, place
         );
 
         // Is this the closure whose kind is currently being inferred?
@@ -801,7 +807,7 @@ impl<'a, 'tcx> InferBorrowKind<'a, 'tcx> {
             | (ty::ClosureKind::FnMut, ty::ClosureKind::FnOnce) => {
                 // new kind is stronger than the old kind
                 self.current_closure_kind = new_kind;
-                self.current_origin = Some((upvar_span, var_name));
+                self.current_origin = Some((upvar_span, place));
             }
         }
     }

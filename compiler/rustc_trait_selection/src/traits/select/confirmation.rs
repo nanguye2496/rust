@@ -8,6 +8,7 @@
 //! https://rustc-dev-guide.rust-lang.org/traits/resolution.html#confirmation
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::lang_items::LangItem;
+use rustc_hir::Constness;
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_infer::infer::InferOk;
 use rustc_infer::infer::LateBoundRegionConversionTime::HigherRankedType;
@@ -55,8 +56,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             }
 
             ParamCandidate(param) => {
-                let obligations = self.confirm_param_candidate(obligation, param);
-                Ok(ImplSource::Param(obligations))
+                let obligations = self.confirm_param_candidate(obligation, param.value);
+                Ok(ImplSource::Param(obligations, param.constness))
             }
 
             ImplCandidate(impl_def_id) => {
@@ -70,7 +71,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
             ProjectionCandidate(idx) => {
                 let obligations = self.confirm_projection_candidate(obligation, idx)?;
-                Ok(ImplSource::Param(obligations))
+                // FIXME(jschievink): constness
+                Ok(ImplSource::Param(obligations, Constness::NotConst))
             }
 
             ObjectCandidate(idx) => {
@@ -106,7 +108,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 // This indicates something like `Trait + Send: Send`. In this case, we know that
                 // this holds because that's what the object type is telling us, and there's really
                 // no additional obligations to prove and no types in particular to unify, etc.
-                Ok(ImplSource::Param(Vec::new()))
+                Ok(ImplSource::Param(Vec::new(), Constness::NotConst))
             }
 
             BuiltinUnsizeCandidate => {
@@ -151,7 +153,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             obligations.extend(self.infcx.commit_if_ok(|_| {
                 self.infcx
                     .at(&obligation.cause, obligation.param_env)
-                    .sup(placeholder_trait_predicate.trait_ref.to_poly_trait_ref(), candidate)
+                    .sup(placeholder_trait_predicate.trait_ref.to_poly_trait_ref(), candidate.value)
                     .map(|InferOk { obligations, .. }| obligations)
                     .map_err(|_| Unimplemented)
             })?);
@@ -257,10 +259,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     ) -> ImplSourceAutoImplData<PredicateObligation<'tcx>> {
         debug!(?obligation, ?trait_def_id, "confirm_auto_impl_candidate");
 
-        let types = obligation.predicate.map_bound(|inner| {
-            let self_ty = self.infcx.shallow_resolve(inner.self_ty());
-            self.constituent_types_for_ty(self_ty)
-        });
+        let self_ty = self.infcx.shallow_resolve(obligation.predicate.self_ty());
+        let types = self.constituent_types_for_ty(self_ty);
         self.vtable_auto_impl(obligation, trait_def_id, types)
     }
 
@@ -334,7 +334,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     fn vtable_impl(
         &mut self,
         impl_def_id: DefId,
-        mut substs: Normalized<'tcx, SubstsRef<'tcx>>,
+        substs: Normalized<'tcx, SubstsRef<'tcx>>,
         cause: ObligationCause<'tcx>,
         recursion_depth: usize,
         param_env: ty::ParamEnv<'tcx>,
@@ -356,9 +356,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         // relying on projections in the impl-trait-ref.
         //
         // e.g., `impl<U: Tr, V: Iterator<Item=U>> Foo<<U as Tr>::T> for V`
-        substs.obligations.append(&mut impl_obligations);
+        impl_obligations.extend(substs.obligations);
 
-        ImplSourceUserDefinedData { impl_def_id, substs: substs.value, nested: substs.obligations }
+        ImplSourceUserDefinedData { impl_def_id, substs: substs.value, nested: impl_obligations }
     }
 
     fn confirm_object_candidate(
@@ -373,24 +373,22 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let self_ty = self.infcx.shallow_resolve(trait_predicate.self_ty());
         let obligation_trait_ref = ty::Binder::dummy(trait_predicate.trait_ref);
         let data = match *self_ty.kind() {
-            ty::Dynamic(data, ..) => {
-                self.infcx
-                    .replace_bound_vars_with_fresh_vars(
-                        obligation.cause.span,
-                        HigherRankedType,
-                        data,
-                    )
-                    .0
-            }
+            ty::Dynamic(data, ..) => data,
             _ => span_bug!(obligation.cause.span, "object candidate with non-object"),
         };
 
-        let object_trait_ref = data
-            .principal()
-            .unwrap_or_else(|| {
-                span_bug!(obligation.cause.span, "object candidate with no principal")
-            })
-            .with_self_ty(self.tcx(), self_ty);
+        let object_trait_ref = data.principal().unwrap_or_else(|| {
+            span_bug!(obligation.cause.span, "object candidate with no principal")
+        });
+        let object_trait_ref = self
+            .infcx
+            .replace_bound_vars_with_fresh_vars(
+                obligation.cause.span,
+                HigherRankedType,
+                object_trait_ref,
+            )
+            .0;
+        let object_trait_ref = object_trait_ref.with_self_ty(self.tcx(), self_ty);
 
         let mut nested = vec![];
 
@@ -434,7 +432,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             .predicates
             .into_iter()
         {
-            if let ty::PredicateAtom::Trait(..) = super_trait.skip_binders() {
+            if let ty::PredicateKind::Trait(..) = super_trait.kind().skip_binder() {
                 let normalized_super_trait = normalize_with_depth_to(
                     self,
                     obligation.param_env,
@@ -445,7 +443,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 );
                 nested.push(Obligation::new(
                     obligation.cause.clone(),
-                    obligation.param_env.clone(),
+                    obligation.param_env,
                     normalized_super_trait,
                 ));
             }
@@ -483,7 +481,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 );
                 nested.push(Obligation::new(
                     obligation.cause.clone(),
-                    obligation.param_env.clone(),
+                    obligation.param_env,
                     normalized_bound,
                 ));
             }
@@ -643,7 +641,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             obligations.push(Obligation::new(
                 obligation.cause.clone(),
                 obligation.param_env,
-                ty::PredicateAtom::ClosureKind(closure_def_id, substs, kind)
+                ty::PredicateKind::ClosureKind(closure_def_id, substs, kind)
                     .to_predicate(self.tcx()),
             ));
         }
@@ -709,15 +707,22 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // Trait+Kx+'a -> Trait+Ky+'b (upcasts).
             (&ty::Dynamic(ref data_a, r_a), &ty::Dynamic(ref data_b, r_b)) => {
                 // See `assemble_candidates_for_unsizing` for more info.
-                let existential_predicates = data_a.map_bound(|data_a| {
-                    let iter = data_a
-                        .principal()
-                        .map(ty::ExistentialPredicate::Trait)
-                        .into_iter()
-                        .chain(data_a.projection_bounds().map(ty::ExistentialPredicate::Projection))
-                        .chain(data_b.auto_traits().map(ty::ExistentialPredicate::AutoTrait));
-                    tcx.mk_existential_predicates(iter)
-                });
+                let iter = data_a
+                    .principal()
+                    .map(|b| b.map_bound(ty::ExistentialPredicate::Trait))
+                    .into_iter()
+                    .chain(
+                        data_a
+                            .projection_bounds()
+                            .map(|b| b.map_bound(ty::ExistentialPredicate::Projection)),
+                    )
+                    .chain(
+                        data_b
+                            .auto_traits()
+                            .map(ty::ExistentialPredicate::AutoTrait)
+                            .map(ty::Binder::dummy),
+                    );
+                let existential_predicates = tcx.mk_poly_existential_predicates(iter);
                 let source_trait = tcx.mk_dynamic(existential_predicates, r_b);
 
                 // Require that the traits involved in this upcast are **equal**;

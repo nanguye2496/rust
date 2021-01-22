@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 use test::ColorConfig;
 use tracing::*;
@@ -43,6 +43,10 @@ fn main() {
         panic!("Can't find Valgrind to run Valgrind tests");
     }
 
+    if !config.has_tidy && config.mode == Mode::Rustdoc {
+        eprintln!("warning: `tidy` is not installed; generated diffs will be harder to read");
+    }
+
     log_config(&config);
     run_tests(config);
 }
@@ -56,6 +60,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         .optopt("", "rust-demangler-path", "path to rust-demangler to use in tests", "PATH")
         .reqopt("", "lldb-python", "path to python to use for doc tests", "PATH")
         .reqopt("", "docck-python", "path to python to use for doc tests", "PATH")
+        .optopt("", "jsondocck-path", "path to jsondocck to use for doc tests", "PATH")
         .optopt("", "valgrind-path", "path to Valgrind executable for Valgrind tests", "PROGRAM")
         .optflag("", "force-valgrind", "fail if Valgrind tests cannot be run under Valgrind")
         .optopt("", "run-clang-based-tests-with", "path to Clang executable", "PATH")
@@ -67,8 +72,8 @@ pub fn parse_config(args: Vec<String>) -> Config {
             "",
             "mode",
             "which sort of compile tests to run",
-            "compile-fail | run-fail | run-pass-valgrind | pretty | debug-info | codegen | rustdoc \
-             codegen-units | incremental | run-make | ui | js-doc-test | mir-opt | assembly",
+            "run-pass-valgrind | pretty | debug-info | codegen | rustdoc \
+            | rustdoc-json | codegen-units | incremental | run-make | ui | js-doc-test | mir-opt | assembly",
         )
         .reqopt(
             "",
@@ -189,6 +194,11 @@ pub fn parse_config(args: Vec<String>) -> Config {
 
     let src_base = opt_path(matches, "src-base");
     let run_ignored = matches.opt_present("ignored");
+    let has_tidy = Command::new("tidy")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .status()
+        .map_or(false, |status| status.success());
     Config {
         bless: matches.opt_present("bless"),
         compile_lib_path: make_absolute(opt_path(matches, "compile-lib-path")),
@@ -198,6 +208,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         rust_demangler_path: matches.opt_str("rust-demangler-path").map(PathBuf::from),
         lldb_python: matches.opt_str("lldb-python").unwrap(),
         docck_python: matches.opt_str("docck-python").unwrap(),
+        jsondocck_path: matches.opt_str("jsondocck-path"),
         valgrind_path: matches.opt_str("valgrind-path"),
         force_valgrind: matches.opt_present("force-valgrind"),
         run_clang_based_tests_with: matches.opt_str("run-clang-based-tests-with"),
@@ -244,6 +255,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         remote_test_client: matches.opt_str("remote-test-client").map(PathBuf::from),
         compare_mode: matches.opt_str("compare-mode").map(CompareMode::parse),
         rustfix_coverage: matches.opt_present("rustfix-coverage"),
+        has_tidy,
 
         cc: matches.opt_str("cc").unwrap(),
         cxx: matches.opt_str("cxx").unwrap(),
@@ -379,7 +391,7 @@ pub fn run_tests(config: Config) {
         }
         Err(e) => {
             // We don't know if tests passed or not, but if there was an error
-            // during testing we don't want to just suceeed (we may not have
+            // during testing we don't want to just succeed (we may not have
             // tested something), so fail.
             //
             // This should realistically "never" happen, so don't try to make
@@ -508,8 +520,6 @@ fn common_inputs_stamp(config: &Config) -> Stamp {
         stamp.add_path(&rustdoc_path);
         stamp.add_path(&rust_src_dir.join("src/etc/htmldocck.py"));
     }
-    // FIXME(richkadel): Do I need to add an `if let Some(rust_demangler_path) contribution to the
-    // stamp here as well?
 
     // Compiletest itself.
     stamp.add_dir(&rust_src_dir.join("src/tools/compiletest/"));

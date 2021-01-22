@@ -108,7 +108,7 @@ use rustc_hir::def::Res;
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
-use rustc_hir::{HirIdMap, Node};
+use rustc_hir::{HirIdMap, ImplicitSelfKind, Node};
 use rustc_index::bit_set::BitSet;
 use rustc_index::vec::Idx;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
@@ -270,7 +270,7 @@ fn adt_destructor(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::Destructor> {
 
 /// If this `DefId` is a "primary tables entry", returns
 /// `Some((body_id, header, decl))` with information about
-/// it's body-id, fn-header and fn-decl (if any). Otherwise,
+/// its body-id, fn-header and fn-decl (if any). Otherwise,
 /// returns `None`.
 ///
 /// If this function returns `Some`, then `typeck_results(def_id)` will
@@ -864,9 +864,9 @@ fn bounds_from_generic_predicates<'tcx>(
     let mut projections = vec![];
     for (predicate, _) in predicates.predicates {
         debug!("predicate {:?}", predicate);
-        let bound_predicate = predicate.bound_atom();
+        let bound_predicate = predicate.kind();
         match bound_predicate.skip_binder() {
-            ty::PredicateAtom::Trait(trait_predicate, _) => {
+            ty::PredicateKind::Trait(trait_predicate, _) => {
                 let entry = types.entry(trait_predicate.self_ty()).or_default();
                 let def_id = trait_predicate.def_id();
                 if Some(def_id) != tcx.lang_items().sized_trait() {
@@ -875,7 +875,7 @@ fn bounds_from_generic_predicates<'tcx>(
                     entry.push(trait_predicate.def_id());
                 }
             }
-            ty::PredicateAtom::Projection(projection_pred) => {
+            ty::PredicateKind::Projection(projection_pred) => {
                 projections.push(bound_predicate.rebind(projection_pred));
             }
             _ => {}
@@ -1134,6 +1134,7 @@ impl ItemLikeVisitor<'tcx> for CheckItemTypesVisitor<'tcx> {
     }
     fn visit_trait_item(&mut self, _: &'tcx hir::TraitItem<'tcx>) {}
     fn visit_impl_item(&mut self, _: &'tcx hir::ImplItem<'tcx>) {}
+    fn visit_foreign_item(&mut self, _: &'tcx hir::ForeignItem<'tcx>) {}
 }
 
 fn typeck_item_bodies(tcx: TyCtxt<'_>, crate_num: CrateNum) {

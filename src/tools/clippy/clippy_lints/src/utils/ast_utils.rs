@@ -10,6 +10,17 @@ use rustc_ast::{self as ast, *};
 use rustc_span::symbol::Ident;
 use std::mem;
 
+pub mod ident_iter;
+pub use ident_iter::IdentIter;
+
+pub fn is_useless_with_eq_exprs(kind: BinOpKind) -> bool {
+    use BinOpKind::*;
+    matches!(
+        kind,
+        Sub | Div | Eq | Lt | Le | Gt | Ge | Ne | And | Or | BitXor | BitAnd | BitOr
+    )
+}
+
 /// Checks if each element in the first slice is contained within the latter as per `eq_fn`.
 pub fn unordered_over<X>(left: &[X], right: &[X], mut eq_fn: impl FnMut(&X, &X) -> bool) -> bool {
     left.len() == right.len() && left.iter().all(|l| right.iter().any(|r| eq_fn(l, r)))
@@ -110,8 +121,7 @@ pub fn eq_expr_opt(l: &Option<P<Expr>>, r: &Option<P<Expr>>) -> bool {
 pub fn eq_struct_rest(l: &StructRest, r: &StructRest) -> bool {
     match (l, r) {
         (StructRest::Base(lb), StructRest::Base(rb)) => eq_expr(lb, rb),
-        (StructRest::Rest(_), StructRest::Rest(_)) => true,
-        (StructRest::None, StructRest::None) => true,
+        (StructRest::Rest(_), StructRest::Rest(_)) | (StructRest::None, StructRest::None) => true,
         _ => false,
     }
 }
@@ -397,8 +407,15 @@ pub fn eq_use_tree_kind(l: &UseTreeKind, r: &UseTreeKind) -> bool {
     }
 }
 
+pub fn eq_anon_const(l: &AnonConst, r: &AnonConst) -> bool {
+    eq_expr(&l.value, &r.value)
+}
+
 pub fn eq_defaultness(l: Defaultness, r: Defaultness) -> bool {
-    matches!((l, r), (Defaultness::Final, Defaultness::Final) | (Defaultness::Default(_), Defaultness::Default(_)))
+    matches!(
+        (l, r),
+        (Defaultness::Final, Defaultness::Final) | (Defaultness::Default(_), Defaultness::Default(_))
+    )
 }
 
 pub fn eq_vis(l: &Visibility, r: &Visibility) -> bool {
@@ -484,7 +501,18 @@ pub fn eq_generic_param(l: &GenericParam, r: &GenericParam) -> bool {
         && match (&l.kind, &r.kind) {
             (Lifetime, Lifetime) => true,
             (Type { default: l }, Type { default: r }) => both(l, r, |l, r| eq_ty(l, r)),
-            (Const { ty: l, kw_span: _ }, Const { ty: r, kw_span: _ }) => eq_ty(l, r),
+            (
+                Const {
+                    ty: lt,
+                    kw_span: _,
+                    default: ld,
+                },
+                Const {
+                    ty: rt,
+                    kw_span: _,
+                    default: rd,
+                },
+            ) => eq_ty(lt, rt) && both(ld, rd, |ld, rd| eq_anon_const(ld, rd)),
             _ => false,
         }
         && over(&l.attrs, &r.attrs, |l, r| eq_attr(l, r))
@@ -528,7 +556,7 @@ pub fn eq_mac_args(l: &MacArgs, r: &MacArgs) -> bool {
     match (l, r) {
         (Empty, Empty) => true,
         (Delimited(_, ld, lts), Delimited(_, rd, rts)) => ld == rd && lts.eq_unspanned(rts),
-        (Eq(_, lts), Eq(_, rts)) => lts.eq_unspanned(rts),
+        (Eq(_, lt), Eq(_, rt)) => lt.kind == rt.kind,
         _ => false,
     }
 }

@@ -22,6 +22,9 @@ use super::Recover;
 /// It is a logic error for an item to be modified in such a way that the item's ordering relative
 /// to any other item, as determined by the [`Ord`] trait, changes while it is in the set. This is
 /// normally only possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
+/// The behavior resulting from such a logic error is not specified, but will not result in
+/// undefined behavior. This could include panics, incorrect results, aborts, memory leaks, and
+/// non-termination.
 ///
 /// [`Ord`]: core::cmp::Ord
 /// [`Cell`]: core::cell::Cell
@@ -214,13 +217,15 @@ impl<T: fmt::Debug> fmt::Debug for Union<'_, T> {
 // This constant is used by functions that compare two sets.
 // It estimates the relative size at which searching performs better
 // than iterating, based on the benchmarks in
-// https://github.com/ssomers/rust_bench_btreeset_intersection;
+// https://github.com/ssomers/rust_bench_btreeset_intersection.
 // It's used to divide rather than multiply sizes, to rule out overflow,
 // and it's a power of two to make that division cheap.
 const ITER_PERFORMANCE_TIPPING_SIZE_DIFF: usize = 16;
 
 impl<T: Ord> BTreeSet<T> {
-    /// Makes a new `BTreeSet` with a reasonable choice of B.
+    /// Makes a new, empty `BTreeSet`.
+    ///
+    /// Does not allocate anything on its own.
     ///
     /// # Examples
     ///
@@ -677,7 +682,7 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
     pub fn pop_first(&mut self) -> Option<T> {
-        self.map.first_entry().map(|entry| entry.remove_entry().0)
+        self.map.pop_first().map(|kv| kv.0)
     }
 
     /// Removes the last value from the set and returns it, if any.
@@ -699,7 +704,7 @@ impl<T: Ord> BTreeSet<T> {
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
     pub fn pop_last(&mut self) -> Option<T> {
-        self.map.last_entry().map(|entry| entry.remove_entry().0)
+        self.map.pop_last().map(|kv| kv.0)
     }
 
     /// Adds a value to the set.
@@ -973,6 +978,7 @@ impl<T> BTreeSet<T> {
     /// v.insert(1);
     /// assert_eq!(v.len(), 1);
     /// ```
+    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
     pub const fn len(&self) -> usize {
@@ -1121,7 +1127,7 @@ impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for BTreeSet<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Ord> Default for BTreeSet<T> {
-    /// Makes an empty `BTreeSet<T>` with a reasonable choice of B.
+    /// Creates an empty `BTreeSet`.
     fn default() -> BTreeSet<T> {
         BTreeSet::new()
     }
