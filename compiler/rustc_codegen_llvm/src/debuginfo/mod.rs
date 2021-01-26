@@ -306,14 +306,18 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         let loc = self.lookup_debug_loc(span.lo());
         let file_metadata = file_metadata(self, &loc.file);
 
+        // Find the enclosing function, in case this is a closure.
+        let def_key = self.tcx().def_key(def_id);
+        let mut name = def_key.disambiguated_data.data.to_string();
+
+        if name.contains("nam_foo_function") {
+            println!("DEBUG HERE");
+        }
+
         let function_type_metadata = unsafe {
             let fn_signature = get_function_signature(self, fn_abi);
             llvm::LLVMRustDIBuilderCreateSubroutineType(DIB(self), fn_signature)
         };
-
-        // Find the enclosing function, in case this is a closure.
-        let def_key = self.tcx().def_key(def_id);
-        let mut name = def_key.disambiguated_data.data.to_string();
 
         let enclosing_fn_def_id = self.tcx().closure_base_def_id(def_id);
 
@@ -398,14 +402,8 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 // and a function `fn bar(x: [(); 7])` as `fn bar(x: *const ())`.
                 // This transformed type is wrong, but these function types are
                 // already inaccurate due to ABI adjustments (see #42800).
-                for arg in fn_abi.args.iter() {
-                    match arg.layout.ty.kind() {
-                        ty::Slice(_) => { println!("Slice arg") }
-                        ty::Int(_) => { println!("int arg") }
-                        ty::RawPtr(ty::TypeAndMut { ty: inner_type, mutbl }) => { println!("Raw ptr") }
-                    }
-                }
-                signature.extend(fn_abi.args.iter().map(|arg| {
+
+                /*signature.extend(fn_abi.args.iter().map(|arg| {
                     let t = arg.layout.ty;
                     let t = match t.kind() {
                         ty::Array(ct, _)
@@ -416,7 +414,36 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                         _ => t,
                     };
                     Some(type_metadata(cx, t, rustc_span::DUMMY_SP))
-                }));
+                }));*/
+                for arg in fn_abi.args.iter() {
+                    let t = arg.layout.ty;
+                    match t.kind() {
+                        ty::Array(ct, _)
+                            if (*ct == cx.tcx.types.u8 || cx.layout_of(ct).is_zst()) =>
+                        {
+                            cx.tcx.mk_imm_ptr(ct);
+                            signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
+                        }
+                        ty::Ref(_, inner_type, _) => {
+                            match inner_type.kind() {
+                                ty::Slice(element_type) => {
+                                    signature.push(Some(type_metadata(cx, cx.tcx.mk_imm_ptr(element_type), rustc_span::DUMMY_SP)));
+                                    signature.push(Some(type_metadata(cx, cx.tcx.types.usize, rustc_span::DUMMY_SP)));
+                                }
+                                ty::Str => {
+                                    signature.push(Some(type_metadata(cx, cx.tcx.mk_imm_ptr(cx.tcx.types.u8), rustc_span::DUMMY_SP)));
+                                    signature.push(Some(type_metadata(cx, cx.tcx.types.usize, rustc_span::DUMMY_SP)))
+                                }
+                                _ => {
+                                    signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
+                                }
+                            };
+                        }
+                        _ => {
+                            signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
+                        }
+                    };
+                }
             } else {
                 signature.extend(
                     fn_abi
