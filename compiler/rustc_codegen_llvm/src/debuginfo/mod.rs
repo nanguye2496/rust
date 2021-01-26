@@ -311,7 +311,6 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
             llvm::LLVMRustDIBuilderCreateSubroutineType(DIB(self), fn_signature)
         };
 
-        
         // Find the enclosing function, in case this is a closure.
         let def_key = self.tcx().def_key(def_id);
         let mut name = def_key.disambiguated_data.data.to_string();
