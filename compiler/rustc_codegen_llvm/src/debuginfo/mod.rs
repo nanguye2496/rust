@@ -306,19 +306,15 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         let loc = self.lookup_debug_loc(span.lo());
         let file_metadata = file_metadata(self, &loc.file);
 
-        // Find the enclosing function, in case this is a closure.
-        let def_key = self.tcx().def_key(def_id);
-        let mut name = def_key.disambiguated_data.data.to_string();
-
-        if name.contains("nam_foo_function") {
-            println!("DEBUG HERE");
-        }
-
         let function_type_metadata = unsafe {
             let fn_signature = get_function_signature(self, fn_abi);
             llvm::LLVMRustDIBuilderCreateSubroutineType(DIB(self), fn_signature)
         };
 
+        
+        // Find the enclosing function, in case this is a closure.
+        let def_key = self.tcx().def_key(def_id);
+        let mut name = def_key.disambiguated_data.data.to_string();
         let enclosing_fn_def_id = self.tcx().closure_base_def_id(def_id);
 
         // Get_template_parameters() will append a `<...>` clause to the function
