@@ -315,6 +315,7 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         // Find the enclosing function, in case this is a closure.
         let def_key = self.tcx().def_key(def_id);
         let mut name = def_key.disambiguated_data.data.to_string();
+
         let enclosing_fn_def_id = self.tcx().closure_base_def_id(def_id);
 
         // Get_template_parameters() will append a `<...>` clause to the function
