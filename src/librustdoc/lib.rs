@@ -168,6 +168,14 @@ fn opts() -> Vec<RustcOptGroup> {
         stable("test-args", |o| {
             o.optmulti("", "test-args", "arguments to pass to the test runner", "ARGS")
         }),
+        unstable("test-run-directory", |o| {
+            o.optopt(
+                "",
+                "test-run-directory",
+                "The working directory in which to run tests",
+                "PATH",
+            )
+        }),
         stable("target", |o| o.optopt("", "target", "target triple to document", "TRIPLE")),
         stable("markdown-css", |o| {
             o.optmulti(
@@ -540,7 +548,7 @@ fn main_options(options: config::Options) -> MainResult {
                 sess.fatal("Compilation failed, aborting rustdoc");
             }
 
-            let mut global_ctxt = abort_on_err(queries.global_ctxt(), sess).take();
+            let mut global_ctxt = abort_on_err(queries.global_ctxt(), sess).peek_mut();
 
             global_ctxt.enter(|tcx| {
                 let (mut krate, render_info, render_opts) = sess.time("run_global_ctxt", || {
