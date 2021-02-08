@@ -398,8 +398,7 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 // and a function `fn bar(x: [(); 7])` as `fn bar(x: *const ())`.
                 // This transformed type is wrong, but these function types are
                 // already inaccurate due to ABI adjustments (see #42800).
-
-                /*signature.extend(fn_abi.args.iter().map(|arg| {
+                signature.extend(fn_abi.args.iter().map(|arg| {
                     let t = arg.layout.ty;
                     let t = match t.kind() {
                         ty::Array(ct, _)
@@ -410,36 +409,7 @@ impl DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                         _ => t,
                     };
                     Some(type_metadata(cx, t, rustc_span::DUMMY_SP))
-                }));*/
-                for arg in fn_abi.args.iter() {
-                    let t = arg.layout.ty;
-                    match t.kind() {
-                        ty::Array(ct, _)
-                            if (*ct == cx.tcx.types.u8 || cx.layout_of(ct).is_zst()) =>
-                        {
-                            cx.tcx.mk_imm_ptr(ct);
-                            signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
-                        }
-                        ty::Ref(_, inner_type, _) => {
-                            match inner_type.kind() {
-                                ty::Slice(element_type) => {
-                                    signature.push(Some(type_metadata(cx, cx.tcx.mk_imm_ptr(element_type), rustc_span::DUMMY_SP)));
-                                    signature.push(Some(type_metadata(cx, cx.tcx.types.usize, rustc_span::DUMMY_SP)));
-                                }
-                                ty::Str => {
-                                    signature.push(Some(type_metadata(cx, cx.tcx.mk_imm_ptr(cx.tcx.types.u8), rustc_span::DUMMY_SP)));
-                                    signature.push(Some(type_metadata(cx, cx.tcx.types.usize, rustc_span::DUMMY_SP)))
-                                }
-                                _ => {
-                                    signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
-                                }
-                            };
-                        }
-                        _ => {
-                            signature.push(Some(type_metadata(cx, t, rustc_span::DUMMY_SP)));
-                        }
-                    };
-                }
+                }));
             } else {
                 signature.extend(
                     fn_abi
