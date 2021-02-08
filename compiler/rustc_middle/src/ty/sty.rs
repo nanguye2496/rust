@@ -2,17 +2,16 @@
 
 #![allow(rustc::usage_of_ty_tykind)]
 
-use self::InferTy::*;
 use self::TyKind::*;
 
 use crate::infer::canonical::Canonical;
 use crate::ty::subst::{GenericArg, InternalSubsts, Subst, SubstsRef};
+use crate::ty::InferTy::{self, *};
 use crate::ty::{
     self, AdtDef, DefIdTree, Discr, Ty, TyCtxt, TypeFlags, TypeFoldable, WithConstness,
 };
 use crate::ty::{DelaySpanBugEmitted, List, ParamEnv, TyS};
 use polonius_engine::Atom;
-use rustc_ast as ast;
 use rustc_data_structures::captures::Captures;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -104,13 +103,13 @@ pub enum TyKind<'tcx> {
     Char,
 
     /// A primitive signed integer type. For example, `i32`.
-    Int(ast::IntTy),
+    Int(ty::IntTy),
 
     /// A primitive unsigned integer type. For example, `u32`.
-    Uint(ast::UintTy),
+    Uint(ty::UintTy),
 
     /// A primitive floating-point type. For example, `f64`.
-    Float(ast::FloatTy),
+    Float(ty::FloatTy),
 
     /// Algebraic data types (ADT). For example: structures, enumerations and unions.
     ///
@@ -1133,8 +1132,16 @@ impl<'tcx> ProjectionTy<'tcx> {
     /// For example, if this is a projection of `<T as Iterator>::Item`,
     /// then this function would return a `T: Iterator` trait reference.
     pub fn trait_ref(&self, tcx: TyCtxt<'tcx>) -> ty::TraitRef<'tcx> {
+        // FIXME: This method probably shouldn't exist at all, since it's not
+        // clear what this method really intends to do. Be careful when
+        // using this method since the resulting TraitRef additionally
+        // contains the substs for the assoc_item, which strictly speaking
+        // is not correct
         let def_id = tcx.associated_item(self.item_def_id).container.id();
-        ty::TraitRef { def_id, substs: self.substs.truncate_to(tcx, tcx.generics_of(def_id)) }
+        // Include substitutions for generic arguments of associated types
+        let assoc_item = tcx.associated_item(self.item_def_id);
+        let substs_assoc_item = self.substs.truncate_to(tcx, tcx.generics_of(assoc_item.def_id));
+        ty::TraitRef { def_id, substs: substs_assoc_item }
     }
 
     pub fn self_ty(&self) -> Ty<'tcx> {
@@ -1426,29 +1433,11 @@ pub struct EarlyBoundRegion {
     pub name: Symbol,
 }
 
-/// A **ty**pe **v**ariable **ID**.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
-pub struct TyVid {
-    pub index: u32,
-}
-
 /// A **`const`** **v**ariable **ID**.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
 pub struct ConstVid<'tcx> {
     pub index: u32,
     pub phantom: PhantomData<&'tcx ()>,
-}
-
-/// An **int**egral (`u32`, `i32`, `usize`, etc.) type **v**ariable **ID**.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
-pub struct IntVid {
-    pub index: u32,
-}
-
-/// An **float**ing-point (`f32` or `f64`) type **v**ariable **ID**.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
-pub struct FloatVid {
-    pub index: u32,
 }
 
 rustc_index::newtype_index! {
@@ -1462,43 +1451,6 @@ impl Atom for RegionVid {
     fn index(self) -> usize {
         Idx::index(self)
     }
-}
-
-/// A placeholder for a type that hasn't been inferred yet.
-///
-/// E.g., if we have an empty array (`[]`), then we create a fresh
-/// type variable for the element type since we won't know until it's
-/// used what the element type is supposed to be.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub enum InferTy {
-    /// A type variable.
-    TyVar(TyVid),
-    /// An integral type variable (`{integer}`).
-    ///
-    /// These are created when the compiler sees an integer literal like
-    /// `1` that could be several different types (`u8`, `i32`, `u32`, etc.).
-    /// We don't know until it's used what type it's supposed to be, so
-    /// we create a fresh type variable.
-    IntVar(IntVid),
-    /// A floating-point type variable (`{float}`).
-    ///
-    /// These are created when the compiler sees an float literal like
-    /// `1.0` that could be either an `f32` or an `f64`.
-    /// We don't know until it's used what type it's supposed to be, so
-    /// we create a fresh type variable.
-    FloatVar(FloatVid),
-
-    /// A [`FreshTy`][Self::FreshTy] is one that is generated as a replacement
-    /// for an unbound type variable. This is convenient for caching etc. See
-    /// `rustc_infer::infer::freshen` for more details.
-    ///
-    /// Compare with [`TyVar`][Self::TyVar].
-    FreshTy(u32),
-    /// Like [`FreshTy`][Self::FreshTy], but as a replacement for [`IntVar`][Self::IntVar].
-    FreshIntTy(u32),
-    /// Like [`FreshTy`][Self::FreshTy], but as a replacement for [`FloatVar`][Self::FloatVar].
-    FreshFloatTy(u32),
 }
 
 rustc_index::newtype_index! {
@@ -1853,7 +1805,7 @@ impl<'tcx> TyS<'tcx> {
     pub fn sequence_element_type(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match self.kind() {
             Array(ty, _) | Slice(ty) => ty,
-            Str => tcx.mk_mach_uint(ast::UintTy::U8),
+            Str => tcx.mk_mach_uint(ty::UintTy::U8),
             _ => bug!("`sequence_element_type` called on non-sequence value: {}", self),
         }
     }
@@ -1927,8 +1879,14 @@ impl<'tcx> TyS<'tcx> {
     pub fn is_scalar(&self) -> bool {
         matches!(
             self.kind(),
-            Bool | Char | Int(_) | Float(_) | Uint(_) | FnDef(..) | FnPtr(_) | RawPtr(_)
-            | Infer(IntVar(_) | FloatVar(_))
+            Bool | Char
+                | Int(_)
+                | Float(_)
+                | Uint(_)
+                | FnDef(..)
+                | FnPtr(_)
+                | RawPtr(_)
+                | Infer(IntVar(_) | FloatVar(_))
         )
     }
 
@@ -1993,7 +1951,7 @@ impl<'tcx> TyS<'tcx> {
 
     #[inline]
     pub fn is_ptr_sized_integral(&self) -> bool {
-        matches!(self.kind(), Int(ast::IntTy::Isize) | Uint(ast::UintTy::Usize))
+        matches!(self.kind(), Int(ty::IntTy::Isize) | Uint(ty::UintTy::Usize))
     }
 
     #[inline]
@@ -2181,9 +2139,9 @@ impl<'tcx> TyS<'tcx> {
     pub fn to_opt_closure_kind(&self) -> Option<ty::ClosureKind> {
         match self.kind() {
             Int(int_ty) => match int_ty {
-                ast::IntTy::I8 => Some(ty::ClosureKind::Fn),
-                ast::IntTy::I16 => Some(ty::ClosureKind::FnMut),
-                ast::IntTy::I32 => Some(ty::ClosureKind::FnOnce),
+                ty::IntTy::I8 => Some(ty::ClosureKind::Fn),
+                ty::IntTy::I16 => Some(ty::ClosureKind::FnMut),
+                ty::IntTy::I32 => Some(ty::ClosureKind::FnOnce),
                 _ => bug!("cannot convert type `{:?}` to a closure kind", self),
             },
 

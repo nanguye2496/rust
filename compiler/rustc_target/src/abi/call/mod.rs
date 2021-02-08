@@ -32,7 +32,7 @@ pub enum PassMode {
     Ignore,
     /// Pass the argument directly.
     ///
-    /// The argument has a layout abi of `Scalar` or `Vector`.
+    /// The argument has a layout abi of `Scalar`, `Vector` or in rare cases `Aggregate`.
     Direct(ArgAttributes),
     /// Pass a pair's elements directly in two arguments.
     ///
@@ -103,7 +103,12 @@ impl ArgAttributes {
     }
 
     pub fn ext(&mut self, ext: ArgExtension) -> &mut Self {
-        assert!(self.arg_ext == ArgExtension::None || self.arg_ext == ext);
+        assert!(
+            self.arg_ext == ArgExtension::None || self.arg_ext == ext,
+            "cannot set {:?} when {:?} is already set",
+            ext,
+            self.arg_ext
+        );
         self.arg_ext = ext;
         self
     }
@@ -453,7 +458,7 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
                 scalar_attrs(&layout, b, a.value.size(cx).align_to(b.value.align(cx).abi)),
             ),
             Abi::Vector { .. } => PassMode::Direct(ArgAttributes::new()),
-            Abi::Aggregate { .. } => Self::indirect_pass_mode(&layout),
+            Abi::Aggregate { .. } => PassMode::Direct(ArgAttributes::new()),
         };
         ArgAbi { layout, pad: None, mode }
     }
@@ -521,7 +526,7 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
     }
 
     pub fn is_indirect(&self) -> bool {
-        matches!(self.mode, PassMode::Indirect {..})
+        matches!(self.mode, PassMode::Indirect { .. })
     }
 
     pub fn is_sized_indirect(&self) -> bool {
@@ -546,6 +551,7 @@ pub enum Conv {
 
     // Target-specific calling conventions.
     ArmAapcs,
+    CCmseNonSecureCall,
 
     Msp430Intr,
 

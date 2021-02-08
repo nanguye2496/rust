@@ -194,7 +194,8 @@ def default_build_triple(verbose):
     # being detected as GNU instead of MSVC.
     default_encoding = sys.getdefaultencoding()
     try:
-        version = subprocess.check_output(["rustc", "--version", "--verbose"])
+        version = subprocess.check_output(["rustc", "--version", "--verbose"],
+                stderr=subprocess.DEVNULL)
         version = version.decode(default_encoding)
         host = next(x for x in version.split('\n') if x.startswith("host: "))
         triple = host.split("host: ")[1]
@@ -833,6 +834,7 @@ class RustBuild(object):
         target_linker = self.get_toml("linker", build_section)
         if target_linker is not None:
             env["RUSTFLAGS"] += " -C linker=" + target_linker
+        # cfg(bootstrap): Add `-Wsemicolon_in_expressions_from_macros` after the next beta bump
         env["RUSTFLAGS"] += " -Wrust_2018_idioms -Wunused_lifetimes"
         if self.get_toml("deny-warnings", "rust") != "false":
             env["RUSTFLAGS"] += " -Dwarnings"
@@ -1084,10 +1086,10 @@ def bootstrap(help_triggered):
     else:
         build.set_normal_environment()
 
+    build.build = args.build or build.build_triple()
     build.update_submodules()
 
     # Fetch/build the bootstrap
-    build.build = args.build or build.build_triple()
     build.download_stage0()
     sys.stdout.flush()
     build.ensure_vendored()

@@ -357,17 +357,15 @@ impl EarlyLintPass for UnsafeCode {
 
     fn check_item(&mut self, cx: &EarlyContext<'_>, it: &ast::Item) {
         match it.kind {
-            ast::ItemKind::Trait(_, ast::Unsafe::Yes(_), ..) => {
-                self.report_unsafe(cx, it.span, |lint| {
+            ast::ItemKind::Trait(box ast::TraitKind(_, ast::Unsafe::Yes(_), ..)) => self
+                .report_unsafe(cx, it.span, |lint| {
                     lint.build("declaration of an `unsafe` trait").emit()
-                })
-            }
+                }),
 
-            ast::ItemKind::Impl { unsafety: ast::Unsafe::Yes(_), .. } => {
-                self.report_unsafe(cx, it.span, |lint| {
+            ast::ItemKind::Impl(box ast::ImplKind { unsafety: ast::Unsafe::Yes(_), .. }) => self
+                .report_unsafe(cx, it.span, |lint| {
                     lint.build("implementation of an `unsafe` trait").emit()
-                })
-            }
+                }),
 
             _ => {}
         }
@@ -872,7 +870,7 @@ declare_lint_pass!(
 
 impl EarlyLintPass for AnonymousParameters {
     fn check_trait_item(&mut self, cx: &EarlyContext<'_>, it: &ast::AssocItem) {
-        if let ast::AssocItemKind::Fn(_, ref sig, _, _) = it.kind {
+        if let ast::AssocItemKind::Fn(box FnKind(_, ref sig, _, _)) = it.kind {
             for arg in sig.decl.inputs.iter() {
                 if let ast::PatKind::Ident(_, ident, None) = arg.pat.kind {
                     if ident.name == kw::Empty {
@@ -2607,7 +2605,7 @@ pub struct ClashingExternDeclarations {
     /// the symbol should be reported as a clashing declaration.
     // FIXME: Technically, we could just store a &'tcx str here without issue; however, the
     // `impl_lint_pass` macro doesn't currently support lints parametric over a lifetime.
-    seen_decls: FxHashMap<String, HirId>,
+    seen_decls: FxHashMap<Symbol, HirId>,
 }
 
 /// Differentiate between whether the name for an extern decl came from the link_name attribute or
@@ -2641,14 +2639,14 @@ impl ClashingExternDeclarations {
         let local_did = tcx.hir().local_def_id(fi.hir_id);
         let did = local_did.to_def_id();
         let instance = Instance::new(did, ty::List::identity_for_item(tcx, did));
-        let name = tcx.symbol_name(instance).name;
-        if let Some(&hir_id) = self.seen_decls.get(name) {
+        let name = Symbol::intern(tcx.symbol_name(instance).name);
+        if let Some(&hir_id) = self.seen_decls.get(&name) {
             // Avoid updating the map with the new entry when we do find a collision. We want to
             // make sure we're always pointing to the first definition as the previous declaration.
             // This lets us avoid emitting "knock-on" diagnostics.
             Some(hir_id)
         } else {
-            self.seen_decls.insert(name.to_owned(), hid)
+            self.seen_decls.insert(name, hid)
         }
     }
 

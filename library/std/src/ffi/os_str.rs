@@ -304,8 +304,7 @@ impl OsString {
     /// The capacity will remain at least as large as both the length
     /// and the supplied value.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
+    /// If the current capacity is less than the lower limit, this is a no-op.
     ///
     /// # Examples
     ///
@@ -827,7 +826,7 @@ impl OsStr {
     /// assert!(!OsString::from("Ferrös").eq_ignore_ascii_case("FERRÖS"));
     /// ```
     #[unstable(feature = "osstring_ascii", issue = "70516")]
-    pub fn eq_ignore_ascii_case<S: ?Sized + AsRef<OsStr>>(&self, other: &S) -> bool {
+    pub fn eq_ignore_ascii_case<S: AsRef<OsStr>>(&self, other: S) -> bool {
         self.inner.eq_ignore_ascii_case(&other.as_ref().inner)
     }
 }

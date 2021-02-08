@@ -30,9 +30,9 @@
 //! get confused if the spans from leaf AST nodes occur in multiple places
 //! in the HIR, especially for multiple identifiers.
 
-#![feature(array_value_iter)]
 #![feature(crate_visibility_modifier)]
 #![feature(or_patterns)]
+#![feature(box_patterns)]
 #![recursion_limit = "256"]
 
 use rustc_ast::node_id::NodeMap;
@@ -501,13 +501,15 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     ItemKind::Struct(_, ref generics)
                     | ItemKind::Union(_, ref generics)
                     | ItemKind::Enum(_, ref generics)
-                    | ItemKind::TyAlias(_, ref generics, ..)
-                    | ItemKind::Trait(_, _, ref generics, ..) => {
+                    | ItemKind::TyAlias(box TyAliasKind(_, ref generics, ..))
+                    | ItemKind::Trait(box TraitKind(_, _, ref generics, ..)) => {
                         let def_id = self.lctx.resolver.local_def_id(item.id);
                         let count = generics
                             .params
                             .iter()
-                            .filter(|param| matches!(param.kind, ast::GenericParamKind::Lifetime { .. }))
+                            .filter(|param| {
+                                matches!(param.kind, ast::GenericParamKind::Lifetime { .. })
+                            })
                             .count();
                         self.lctx.type_def_lifetime_params.insert(def_id.to_def_id(), count);
                     }
@@ -1074,16 +1076,40 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_assoc_ty_constraint(
         &mut self,
         constraint: &AssocTyConstraint,
-        itctx: ImplTraitContext<'_, 'hir>,
+        mut itctx: ImplTraitContext<'_, 'hir>,
     ) -> hir::TypeBinding<'hir> {
         debug!("lower_assoc_ty_constraint(constraint={:?}, itctx={:?})", constraint, itctx);
 
-        if let Some(ref gen_args) = constraint.gen_args {
-            self.sess.span_fatal(
-                gen_args.span(),
-                "generic associated types in trait paths are currently not implemented",
-            );
-        }
+        // lower generic arguments of identifier in constraint
+        let gen_args = if let Some(ref gen_args) = constraint.gen_args {
+            let gen_args_ctor = match gen_args {
+                GenericArgs::AngleBracketed(ref data) => {
+                    self.lower_angle_bracketed_parameter_data(
+                        data,
+                        ParamMode::Explicit,
+                        itctx.reborrow(),
+                    )
+                    .0
+                }
+                GenericArgs::Parenthesized(ref data) => {
+                    let mut err = self.sess.struct_span_err(
+                        gen_args.span(),
+                        "parenthesized generic arguments cannot be used in associated type constraints"
+                    );
+                    // FIXME: try to write a suggestion here
+                    err.emit();
+                    self.lower_angle_bracketed_parameter_data(
+                        &data.as_angle_bracketed_args(),
+                        ParamMode::Explicit,
+                        itctx.reborrow(),
+                    )
+                    .0
+                }
+            };
+            self.arena.alloc(gen_args_ctor.into_generic_args(&self.arena))
+        } else {
+            self.arena.alloc(hir::GenericArgs::none())
+        };
 
         let kind = match constraint.kind {
             AssocTyConstraintKind::Equality { ref ty } => {
@@ -1180,6 +1206,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         hir::TypeBinding {
             hir_id: self.lower_node_id(constraint.id),
             ident: constraint.ident,
+            gen_args,
             kind,
             span: constraint.span,
         }

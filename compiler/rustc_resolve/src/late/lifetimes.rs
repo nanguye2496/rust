@@ -2083,17 +2083,10 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
         output: Option<&'tcx hir::Ty<'tcx>>,
     ) {
         debug!("visit_fn_like_elision: enter");
-        let mut arg_elide = Elide::FreshLateAnon(Cell::new(0));
-        let arg_scope = Scope::Elision { elide: arg_elide.clone(), s: self.scope };
+        let arg_scope = Scope::Elision { elide: Elide::FreshLateAnon(Cell::new(0)), s: self.scope };
         self.with(arg_scope, |_, this| {
             for input in inputs {
                 this.visit_ty(input);
-            }
-            match *this.scope {
-                Scope::Elision { ref elide, .. } => {
-                    arg_elide = elide.clone();
-                }
-                _ => bug!(),
             }
         });
 
@@ -2422,7 +2415,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
                                     _ => break,
                                 }
                             }
-                            break Some(e);
+                            break Some(&e[..]);
                         }
                         Elide::Forbid => break None,
                     };
@@ -2452,7 +2445,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
             lifetime_refs.len(),
             &lifetime_names,
             lifetime_spans,
-            error.map(|p| &p[..]).unwrap_or(&[]),
+            error.unwrap_or(&[]),
         );
         err.emit();
     }

@@ -11,7 +11,6 @@ use core::ptr;
 use super::borrow::DormantMutRef;
 use super::node::{self, marker, ForceResult::*, Handle, NodeRef, Root};
 use super::search::SearchResult::*;
-use super::unwrap_unchecked;
 
 mod entry;
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
@@ -300,8 +299,8 @@ pub struct IterMut<'a, K: 'a, V: 'a> {
 /// [`into_iter`]: IntoIterator::into_iter
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<K, V> {
-    front: Option<Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>>,
-    back: Option<Handle<NodeRef<marker::Owned, K, V, marker::Leaf>, marker::Edge>>,
+    front: Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>,
+    back: Option<Handle<NodeRef<marker::Dying, K, V, marker::Leaf>, marker::Edge>>,
     length: usize,
 }
 
@@ -460,7 +459,7 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for RangeMut<'_, K, V> {
     }
 }
 
-impl<K: Ord, V> BTreeMap<K, V> {
+impl<K, V> BTreeMap<K, V> {
     /// Makes a new, empty `BTreeMap`.
     ///
     /// Does not allocate anything on its own.
@@ -479,7 +478,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
-    pub const fn new() -> BTreeMap<K, V> {
+    pub const fn new() -> BTreeMap<K, V>
+    where
+        K: Ord,
+    {
         BTreeMap { root: None, length: 0 }
     }
 
@@ -499,7 +501,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn clear(&mut self) {
-        *self = BTreeMap::new();
+        *self = BTreeMap { root: None, length: 0 };
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -522,7 +524,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         let root_node = self.root.as_ref()?.reborrow();
@@ -550,7 +552,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "map_get_key_value", since = "1.40.0")]
     pub fn get_key_value<Q: ?Sized>(&self, k: &Q) -> Option<(&K, &V)>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         let root_node = self.root.as_ref()?.reborrow();
@@ -578,7 +580,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(map.first_key_value(), Some((&1, &"b")));
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn first_key_value(&self) -> Option<(&K, &V)> {
+    pub fn first_key_value(&self) -> Option<(&K, &V)>
+    where
+        K: Ord,
+    {
         let root_node = self.root.as_ref()?.reborrow();
         root_node.first_leaf_edge().right_kv().ok().map(Handle::into_kv)
     }
@@ -604,7 +609,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(*map.get(&2).unwrap(), "b");
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn first_entry(&mut self) -> Option<OccupiedEntry<'_, K, V>> {
+    pub fn first_entry(&mut self) -> Option<OccupiedEntry<'_, K, V>>
+    where
+        K: Ord,
+    {
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = map.root.as_mut()?.borrow_mut();
         let kv = root_node.first_leaf_edge().right_kv().ok()?;
@@ -631,7 +639,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert!(map.is_empty());
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn pop_first(&mut self) -> Option<(K, V)> {
+    pub fn pop_first(&mut self) -> Option<(K, V)>
+    where
+        K: Ord,
+    {
         self.first_entry().map(|entry| entry.remove_entry())
     }
 
@@ -652,7 +663,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(map.last_key_value(), Some((&2, &"a")));
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn last_key_value(&self) -> Option<(&K, &V)> {
+    pub fn last_key_value(&self) -> Option<(&K, &V)>
+    where
+        K: Ord,
+    {
         let root_node = self.root.as_ref()?.reborrow();
         root_node.last_leaf_edge().left_kv().ok().map(Handle::into_kv)
     }
@@ -678,7 +692,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(*map.get(&2).unwrap(), "last");
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn last_entry(&mut self) -> Option<OccupiedEntry<'_, K, V>> {
+    pub fn last_entry(&mut self) -> Option<OccupiedEntry<'_, K, V>>
+    where
+        K: Ord,
+    {
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = map.root.as_mut()?.borrow_mut();
         let kv = root_node.last_leaf_edge().left_kv().ok()?;
@@ -705,7 +722,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert!(map.is_empty());
     /// ```
     #[unstable(feature = "map_first_last", issue = "62924")]
-    pub fn pop_last(&mut self) -> Option<(K, V)> {
+    pub fn pop_last(&mut self) -> Option<(K, V)>
+    where
+        K: Ord,
+    {
         self.last_entry().map(|entry| entry.remove_entry())
     }
 
@@ -729,7 +749,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         self.get(key).is_some()
@@ -758,7 +778,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         let root_node = self.root.as_mut()?.borrow_mut();
@@ -795,7 +815,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(map[&37], "c");
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V>
+    where
+        K: Ord,
+    {
         match self.entry(key) {
             Occupied(mut entry) => Some(entry.insert(value)),
             Vacant(entry) => {
@@ -823,10 +846,11 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(map.remove(&1), Some("a"));
     /// assert_eq!(map.remove(&1), None);
     /// ```
+    #[doc(alias = "delete")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         self.remove_entry(key).map(|(_, v)| v)
@@ -853,7 +877,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "btreemap_remove_entry", since = "1.45.0")]
     pub fn remove_entry<Q: ?Sized>(&mut self, key: &Q) -> Option<(K, V)>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
         Q: Ord,
     {
         let (map, dormant_map) = DormantMutRef::new(self);
@@ -885,6 +909,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[unstable(feature = "btree_retain", issue = "79025")]
     pub fn retain<F>(&mut self, mut f: F)
     where
+        K: Ord,
         F: FnMut(&K, &mut V) -> bool,
     {
         self.drain_filter(|k, v| !f(k, v));
@@ -919,7 +944,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(a[&5], "f");
     /// ```
     #[stable(feature = "btree_append", since = "1.11.0")]
-    pub fn append(&mut self, other: &mut Self) {
+    pub fn append(&mut self, other: &mut Self)
+    where
+        K: Ord,
+    {
         // Do we have to append anything at all?
         if other.is_empty() {
             return;
@@ -970,7 +998,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     pub fn range<T: ?Sized, R>(&self, range: R) -> Range<'_, K, V>
     where
         T: Ord,
-        K: Borrow<T>,
+        K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
         if let Some(root) = &self.root {
@@ -1016,7 +1044,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     pub fn range_mut<T: ?Sized, R>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         T: Ord,
-        K: Borrow<T>,
+        K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
         if let Some(root) = &mut self.root {
@@ -1047,7 +1075,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// assert_eq!(count["a"], 3);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V>
+    where
+        K: Ord,
+    {
         // FIXME(@porglezomp) Avoid allocating if we don't insert
         let (map, dormant_map) = DormantMutRef::new(self);
         let root_node = Self::ensure_is_owned(&mut map.root).borrow_mut();
@@ -1091,7 +1122,7 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[stable(feature = "btree_split_off", since = "1.11.0")]
     pub fn split_off<Q: ?Sized + Ord>(&mut self, key: &Q) -> Self
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Ord,
     {
         if self.is_empty() {
             return Self::new();
@@ -1116,21 +1147,23 @@ impl<K: Ord, V> BTreeMap<K, V> {
         right
     }
 
-    /// Creates an iterator which uses a closure to determine if an element should be removed.
+    /// Creates an iterator that visits all elements (key-value pairs) in
+    /// ascending key order and uses a closure to determine if an element should
+    /// be removed. If the closure returns `true`, the element is removed from
+    /// the map and yielded. If the closure returns `false`, or panics, the
+    /// element remains in the map and will not be yielded.
     ///
-    /// If the closure returns true, the element is removed from the map and yielded.
-    /// If the closure returns false, or panics, the element remains in the map and will not be
-    /// yielded.
+    /// The iterator also lets you mutate the value of each element in the
+    /// closure, regardless of whether you choose to keep or remove it.
     ///
-    /// Note that `drain_filter` lets you mutate every value in the filter closure, regardless of
-    /// whether you choose to keep or remove it.
+    /// If the iterator is only partially consumed or not consumed at all, each
+    /// of the remaining elements is still subjected to the closure, which may
+    /// change its value and, by returning `true`, have the element removed and
+    /// dropped.
     ///
-    /// If the iterator is only partially consumed or not consumed at all, each of the remaining
-    /// elements will still be subjected to the closure and removed and dropped if it returns true.
-    ///
-    /// It is unspecified how many more elements will be subjected to the closure
-    /// if a panic occurs in the closure, or a panic occurs while dropping an element,
-    /// or if the `DrainFilter` value is leaked.
+    /// It is unspecified how many more elements will be subjected to the
+    /// closure if a panic occurs in the closure, or a panic occurs while
+    /// dropping an element, or if the `DrainFilter` value is leaked.
     ///
     /// # Examples
     ///
@@ -1149,12 +1182,16 @@ impl<K: Ord, V> BTreeMap<K, V> {
     #[unstable(feature = "btree_drain_filter", issue = "70530")]
     pub fn drain_filter<F>(&mut self, pred: F) -> DrainFilter<'_, K, V, F>
     where
+        K: Ord,
         F: FnMut(&K, &mut V) -> bool,
     {
         DrainFilter { pred, inner: self.drain_filter_inner() }
     }
 
-    pub(super) fn drain_filter_inner(&mut self) -> DrainFilterInner<'_, K, V> {
+    pub(super) fn drain_filter_inner(&mut self) -> DrainFilterInner<'_, K, V>
+    where
+        K: Ord,
+    {
         if let Some(root) = self.root.as_mut() {
             let (root, dormant_root) = DormantMutRef::new(root);
             let front = root.borrow_mut().first_leaf_edge();
@@ -1364,7 +1401,7 @@ impl<K, V> IntoIterator for BTreeMap<K, V> {
     fn into_iter(self) -> IntoIter<K, V> {
         let mut me = ManuallyDrop::new(self);
         if let Some(root) = me.root.take() {
-            let (f, b) = root.full_range();
+            let (f, b) = root.into_dying().full_range();
 
             IntoIter { front: Some(f), back: Some(b), length: me.length }
         } else {
@@ -1386,7 +1423,7 @@ impl<K, V> Drop for IntoIter<K, V> {
 
                 unsafe {
                     let mut node =
-                        unwrap_unchecked(ptr::read(&self.0.front)).into_node().forget_type();
+                        ptr::read(&self.0.front).unwrap_unchecked().into_node().forget_type();
                     while let Some(parent) = node.deallocate_and_ascend() {
                         node = parent.into_node().forget_type();
                     }
@@ -1711,7 +1748,7 @@ impl<'a, K, V> Range<'a, K, V> {
     }
 
     unsafe fn next_unchecked(&mut self) -> (&'a K, &'a V) {
-        unsafe { unwrap_unchecked(self.front.as_mut()).next_unchecked() }
+        unsafe { self.front.as_mut().unwrap_unchecked().next_unchecked() }
     }
 }
 
@@ -1800,7 +1837,7 @@ impl<'a, K, V> DoubleEndedIterator for Range<'a, K, V> {
 
 impl<'a, K, V> Range<'a, K, V> {
     unsafe fn next_back_unchecked(&mut self) -> (&'a K, &'a V) {
-        unsafe { unwrap_unchecked(self.back.as_mut()).next_back_unchecked() }
+        unsafe { self.back.as_mut().unwrap_unchecked().next_back_unchecked() }
     }
 }
 
@@ -1846,7 +1883,7 @@ impl<'a, K, V> RangeMut<'a, K, V> {
     }
 
     unsafe fn next_unchecked(&mut self) -> (&'a K, &'a mut V) {
-        unsafe { unwrap_unchecked(self.front.as_mut()).next_unchecked() }
+        unsafe { self.front.as_mut().unwrap_unchecked().next_unchecked() }
     }
 
     /// Returns an iterator of references over the remaining items.
@@ -1876,7 +1913,7 @@ impl<K, V> FusedIterator for RangeMut<'_, K, V> {}
 
 impl<'a, K, V> RangeMut<'a, K, V> {
     unsafe fn next_back_unchecked(&mut self) -> (&'a K, &'a mut V) {
-        unsafe { unwrap_unchecked(self.back.as_mut()).next_back_unchecked() }
+        unsafe { self.back.as_mut().unwrap_unchecked().next_back_unchecked() }
     }
 }
 
@@ -1967,9 +2004,9 @@ impl<K: Debug, V: Debug> Debug for BTreeMap<K, V> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<K: Ord, Q: ?Sized, V> Index<&Q> for BTreeMap<K, V>
+impl<K, Q: ?Sized, V> Index<&Q> for BTreeMap<K, V>
 where
-    K: Borrow<Q>,
+    K: Borrow<Q> + Ord,
     Q: Ord,
 {
     type Output = V;
