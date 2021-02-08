@@ -341,11 +341,24 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             && var.source_info.scope == mir::OUTERMOST_SOURCE_SCOPE
                         {
                             let arg_index = place.local.index() - 1;
-
-                            // FIXME(eddyb) shouldn't `ArgumentVariable` indices be
-                            // offset in closures to account for the hidden environment?
-                            // Also, is this `+ 1` needed at all?
-                            VariableKind::ArgumentVariable(arg_index + 1)
+                            // Rust compiler decomposes every &str or slice argument into two components
+                            // a pointer to the memory address storing the data and an u32 representing
+                            // the length of the str or slice. These components were then used to reconstruct
+                            // the original argument inside the body of the function. Since the original argument
+                            // was declared inside the body of the function rather than being passed by the function's
+                            // caller, its kind should be LocalVariable.
+                            match *var_ty.kind() {
+                                ty::Ref(_, inner_type, _) => {
+                                    match *inner_type.kind() {
+                                        ty::Slice(_) | ty::Str => VariableKind::LocalVariable,
+                                        _ => VariableKind::ArgumentVariable(arg_index + 1),
+                                    }
+                                }
+                                // FIXME(eddyb) shouldn't `ArgumentVariable` indices be
+                                // offset in closures to account for the hidden environment?
+                                // Also, is this `+ 1` needed at all?
+                                _ => VariableKind::ArgumentVariable(arg_index + 1)
+                            }
                         } else {
                             VariableKind::LocalVariable
                         };
