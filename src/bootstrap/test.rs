@@ -124,8 +124,25 @@ You can skip linkcheck with --exclude src/tools/linkchecker"
 
         builder.info(&format!("Linkcheck ({})", host));
 
+        // Test the linkchecker itself.
+        let bootstrap_host = builder.config.build;
+        let compiler = builder.compiler(0, bootstrap_host);
+        let cargo = tool::prepare_tool_cargo(
+            builder,
+            compiler,
+            Mode::ToolBootstrap,
+            bootstrap_host,
+            "test",
+            "src/tools/linkchecker",
+            SourceType::InTree,
+            &[],
+        );
+        try_run(builder, &mut cargo.into());
+
+        // Build all the default documentation.
         builder.default_doc(&[]);
 
+        // Run the linkchecker.
         let _time = util::timeit(&builder);
         try_run(
             builder,
@@ -805,16 +822,16 @@ impl Step for RustdocGUI {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        let run = run.path("src/test/rustdoc-gui");
-        run.default_condition(
+        let run = run.suite_path("src/test/rustdoc-gui");
+        run.lazy_default_condition(Box::new(move || {
             builder.config.nodejs.is_some()
                 && builder
                     .config
                     .npm
                     .as_ref()
                     .map(|p| check_if_browser_ui_test_is_installed(p))
-                    .unwrap_or(false),
-        )
+                    .unwrap_or(false)
+        }))
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -870,6 +887,16 @@ impl Step for RustdocGUI {
             .arg(out_dir)
             .arg("--tests-folder")
             .arg(builder.build.src.join("src/test/rustdoc-gui"));
+        for path in &builder.paths {
+            if let Some(name) = path.file_name().and_then(|f| f.to_str()) {
+                if name.ends_with(".goml") {
+                    command.arg("--file").arg(name);
+                }
+            }
+        }
+        for test_arg in builder.config.cmd.test_args() {
+            command.arg(test_arg);
+        }
         builder.run(&mut command);
     }
 }

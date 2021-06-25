@@ -43,7 +43,8 @@ use rustc_hir::definitions::Definitions;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
-    Constness, HirId, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet, Node, TraitCandidate,
+    Constness, ExprKind, HirId, ImplItemKind, ItemKind, ItemLocalId, ItemLocalMap, ItemLocalSet,
+    Node, TraitCandidate, TraitItemKind,
 };
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_macros::HashStable;
@@ -53,6 +54,7 @@ use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_session::config::{BorrowckMode, CrateType, OutputFilenames};
 use rustc_session::lint::{Level, Lint};
 use rustc_session::Session;
+use rustc_span::def_id::StableCrateId;
 use rustc_span::source_map::MultiSpan;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
@@ -391,6 +393,34 @@ pub struct TypeckResults<'tcx> {
     /// (including late-bound regions) are replaced with free
     /// equivalents. This table is not used in codegen (since regions
     /// are erased there) and hence is not serialized to metadata.
+    ///
+    /// This table also contains the "revealed" values for any `impl Trait`
+    /// that appear in the signature and whose values are being inferred
+    /// by this function.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// fn foo(x: &u32) -> impl Debug { *x }
+    /// ```
+    ///
+    /// The function signature here would be:
+    ///
+    /// ```
+    /// for<'a> fn(&'a u32) -> Foo
+    /// ```
+    ///
+    /// where `Foo` is an opaque type created for this function.
+    ///
+    ///
+    /// The *liberated* form of this would be
+    ///
+    /// ```
+    /// fn(&'a u32) -> u32
+    /// ```
+    ///
+    /// Note that `'a` is not bound (it would be an `ReFree`) and
+    /// that the `Foo` opaque type is replaced by its hidden type.
     liberated_fn_sigs: ItemLocalMap<ty::FnSig<'tcx>>,
 
     /// For each FRU expression, record the normalized types of the fields
@@ -1264,6 +1294,11 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
+    #[inline]
+    pub fn stable_crate_id(self, cnum: CrateNum) -> StableCrateId {
+        self.def_path_hash(cnum.as_def_id()).stable_crate_id()
+    }
+
     pub fn def_path_debug_str(self, def_id: DefId) -> String {
         // We are explicitly not going through queries here in order to get
         // crate name and disambiguator since this code is called from debug!()
@@ -1464,18 +1499,14 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn return_type_impl_trait(self, scope_def_id: LocalDefId) -> Option<(Ty<'tcx>, Span)> {
-        // HACK: `type_of_def_id()` will fail on these (#55796), so return `None`.
+        // `type_of()` will fail on these (#55796, #86483), so only allow `fn`s or closures.
         let hir_id = self.hir().local_def_id_to_hir_id(scope_def_id);
         match self.hir().get(hir_id) {
-            Node::Item(item) => {
-                match item.kind {
-                    ItemKind::Fn(..) => { /* `type_of_def_id()` will work */ }
-                    _ => {
-                        return None;
-                    }
-                }
-            }
-            _ => { /* `type_of_def_id()` will work or panic */ }
+            Node::Item(&hir::Item { kind: ItemKind::Fn(..), .. }) => {}
+            Node::TraitItem(&hir::TraitItem { kind: TraitItemKind::Fn(..), .. }) => {}
+            Node::ImplItem(&hir::ImplItem { kind: ImplItemKind::Fn(..), .. }) => {}
+            Node::Expr(&hir::Expr { kind: ExprKind::Closure(..), .. }) => {}
+            _ => return None,
         }
 
         let ret_ty = self.type_of(scope_def_id);
